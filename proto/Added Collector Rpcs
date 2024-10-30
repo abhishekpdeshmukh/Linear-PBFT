@@ -15,10 +15,12 @@ service ClientService {
 service PBFTService {
   
   // Leader (collector) multicasts the transaction to other replicas in the PrePrepare stage
-  rpc PrePrepare(PrePrepareMessageWrapper) returns (PrepareMessage);
+  rpc PrePrepare(PrePrepareMessageWrapper) returns (google.protobuf.Empty);
 
   // Replicas send Prepare messages back to the leader after validating PrePrepare
-  rpc Prepare(CollectPrepareRequest) returns (google.protobuf.Empty);
+  rpc Prepare(PrepareMessageRequest) returns (google.protobuf.Empty);
+
+  rpc CollectedPrepare(CollectPrepareRequest) returns (google.protobuf.Empty);
 
   // Leader collects Prepare messages and then sends Commit messages to replicas
   rpc Commit(CommitMessage) returns (google.protobuf.Empty);
@@ -71,8 +73,8 @@ message PrePrepareRequest {
     bytes signature = 2;
 }
 message PrePrepareMessage {
-  string leaderId = 1;       // Leader ID initiating the PrePrepare
-  string transactionId = 2;  // Transaction ID assigned by the client
+  int32 leaderId = 1;       // Leader ID initiating the PrePrepare
+  int32 transactionId = 2;  // Transaction ID assigned by the client
   int32 viewNumber = 3;      // Current view number
   int32 sequenceNumber = 4;
   bytes transactionDigest = 5; // Digest of the transaction for validation
@@ -84,8 +86,8 @@ message PrePrepareMessageWrapper {
     TransactionRequest transactionRequest = 2;
 }
 message PrepareMessage {
-  string replica_id = 1;      // ID of the replica sending the Prepare
-  string transaction_id = 2;  // Transaction ID for Prepare stage
+  int32 replica_id = 1;      // ID of the replica sending the Prepare
+  int32 transaction_id = 2;  // Transaction ID for Prepare stage
   int32 view_number = 3;      // Current view number
   int32 sequence_number = 4;
   bytes transaction_digest = 5; // Digest of the transaction for validation
@@ -105,15 +107,15 @@ message CollectPrepareRequest {
 }
 
 message CommitMessage {
-  string leader_id = 1;       // Leader ID initiating the Commit
-  string transaction_id = 2;  // Transaction ID for Commit stage
+  int32 leader_id = 1;       // Leader ID initiating the Commit
+  int32 transaction_id = 2;  // Transaction ID for Commit stage
   int32 view_number = 3;      // Current view number
   bytes transaction_digest = 4; // Digest of the transaction for validation
 }
 
 message CommitConfirmationMessage {
-  string replica_id = 1;      // ID of the replica confirming the commit
-  string transaction_id = 2;  // Transaction ID that has been committed
+  int32 replica_id = 1;      // ID of the replica confirming the commit
+  int32 transaction_id = 2;  // Transaction ID that has been committed
   int32 view_number = 3;      // Current view number
 }
 
@@ -123,24 +125,24 @@ message ReplicaAck {
 }
 
 message ClientRequest {
-  string client_id = 1;       // Client ID making the request
-  string transaction_id = 2;  // Transaction ID for tracking
+  int32 client_id = 1;       // Client ID making the request
+  int32 transaction_id = 2;  // Transaction ID for tracking
 }
 
 message ClientResponseMessage {
   bool committed = 1;         // Indicates if transaction is fully committed
-  string transaction_id = 2;  // Transaction ID
+  int32 transaction_id = 2;  // Transaction ID
   string message = 3;         // Status or result message for the client
 }
 
 message ViewChangeRequest {
-  string replica_id = 1;      // ID of the replica initiating view change
+  int32 replica_id = 1;      // ID of the replica initiating view change
   int32 view_number = 2;      // Proposed new view number
-  string last_stable_checkpoint = 3; // Latest checkpoint digest
+  int32 last_stable_checkpoint = 3; // Latest checkpoint digest
 }
 
 message NewViewMessage {
-  string new_leader_id = 1;   // ID of the new leader
+  int32 new_leader_id = 1;   // ID of the new leader
   int32 view_number = 2;      // Updated view number
   repeated bytes view_change_messages = 3; // Collection of view change messages
 }
