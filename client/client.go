@@ -24,10 +24,18 @@ import (
 
 type Client struct {
 	pb.UnimplementedClientServiceServer
-	id         int32
-	privateKey ed25519.PrivateKey
-	view       int32
+	id             int32
+	privateKey     ed25519.PrivateKey
+	view           int32
+	transactionMap map[int]TransactionHandler
 }
+type TransactionHandler struct {
+	replyCh chan bool   // Channel to track replies for each transaction
+	timer   *time.Timer // Timer to track timeout
+}
+
+const N = 7
+const F int = (N - 1) / 2
 
 var transactionSets = make(map[int][]*pb.TransactionRequest)
 var liveServersMap = make(map[int][]int)
@@ -46,14 +54,16 @@ func main() {
 	fmt.Printf("Entity %d:\nPublic Key: %x\nPrivate Key: %x\n\n", 1, publicKey, privateKey)
 	var currentSetNumber = 1
 	var allSetsRead = false
-	setupClientReceiver(int(currClient.id), currClient)
+	go setupClientReceiver(int(currClient.id), currClient)
 	// Infinite loop for continuously taking user input
+
+	transactionMap := make(map[int]*TransactionHandler)
 	for {
 		// Display menu options
 		fmt.Println("\nSelect an option:")
 		fmt.Println("1. Read Transaction SET on Default Path")
 		fmt.Println("2. Send Transactions (Next Set)")
-		fmt.Println("3. Kill Nodes")
+		fmt.Println("3. Send Client Public Key")
 		fmt.Println("4. Print Balance on Specific Server")
 		fmt.Println("5. Spawn All Nodes")
 		fmt.Println("6. Exit")
@@ -83,6 +93,7 @@ func main() {
 
 		case 2:
 			// Send transactions from the current set number
+
 			if !allSetsRead {
 				fmt.Println("No transactions have been read. Please choose option 1 first.")
 				continue
@@ -133,6 +144,34 @@ func main() {
 				// Now send transactions to all servers as usual
 				for _, tran := range transactions {
 					// Set up RPC connection and send the transaction to all servers (including killed ones)
+					replyCh := make(chan bool, 1) // Buffered channel for non-blocking
+					handler := &TransactionHandler{
+						replyCh: replyCh,
+						timer:   time.NewTimer(5 * time.Second), // Adjust the timeout as needed
+					}
+					transactionMap[int(tran.TransactionId)] = handler
+
+					// Start a goroutine to handle the timer and replies
+					go func(id int, handler *TransactionHandler) {
+						replyCount := 0
+						select {
+						case <-handler.replyCh:
+							// f+1 replies received before timeout, stop the timer
+							replyCount++
+							fmt.Println("Yess got response from a server")
+							if replyCount >= F+1 {
+								if !handler.timer.Stop() {
+									<-handler.timer.C // Drain the timer channel if already expired
+								}
+								fmt.Printf("Transaction %d: Received f+1 replies, timer stopped\n", id)
+							}
+
+						case <-handler.timer.C:
+							// Timeout occurred before receiving f+1 replies
+							fmt.Printf("Transaction %d: Timeout occurred, broadcasting transaction to all nodes\n", id)
+							// Logic to handle broadcasting can be placed here
+						}
+					}(int(tran.TransactionId), handler)
 					go func() {
 						c, ctx, conn := setupClientSender(int(currClient.view) % 7)
 						_, err := c.SendTransaction(ctx, tran)
@@ -148,43 +187,10 @@ func main() {
 			} else {
 				fmt.Println("No more sets to send.")
 			}
-
 		case 3:
-			// Example for killing nodes
-			// c, ctx, conn := setupClientReceiver(int(Client.id))
-			// r, err := c.Kill(ctx, &pb.AdminRequest{Command: "Die and Perish"})
-			// if err != nil {
-			// 	log.Fatalf("Could not kill: %v", err)
-			// }
-			// log.Printf("Kill Command Sent: %s", r.Ack)
-			// conn.Close()
-
-		case 4:
-			// Example for printing balances from each node
-			// for i := 1; i <= 5; i++ {
-			// c, ctx, conn := setupClientReceiver(int(Client.id))
-			// 	r, err := c.GetBalance(ctx, &pb.AdminRequest{Command: "Requesting Balance"})
-			// 	if err != nil {
-			// 		log.Fatalf("Could not retrieve balance: %v", err)
-			// 	}
-			// 	log.Println("Server", r.NodeID, "Balance:", r.Balance)
-			// 	conn.Close()
-			// }
-
-		case 5:
-			// Placeholder for spawning all nodes
-			fmt.Println("Executing: Spawn All Nodes")
-			// Add node spawning logic here if required
-
-		case 6:
-			// Exit the program
-			fmt.Println("Exiting program...")
-			os.Exit(0)
-
-		default:
-			// Invalid option handling
-			fmt.Println("Invalid option. Please choose a valid number.")
+			sendKey(publicKey)
 		}
+
 	}
 }
 
@@ -194,7 +200,6 @@ func transactionDigest(tx *pb.Transaction) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to serialize transaction: %w", err)
 	}
-
 	// Compute the SHA-256 hash of the transaction data
 	hash := sha256.New()
 	hash.Write(data)
@@ -279,6 +284,9 @@ func ReadTransactions(currClient *Client, filename string) (map[int][]*pb.Transa
 			Amount:   float32(amount),
 		}
 		digest, err := transactionDigest(transaction)
+		if err != nil {
+			fmt.Println("Error in making digest ", err)
+		}
 		signature := ed25519.Sign(currClient.privateKey, digest)
 		trans := pb.TransactionRequest{
 			SetNumber:     int32(currentSetNumber),
@@ -295,7 +303,8 @@ func ReadTransactions(currClient *Client, filename string) (map[int][]*pb.Transa
 }
 
 func (c *Client) ClientResponse(ctx context.Context, req *pb.ClientRequest) (*emptypb.Empty, error) {
-	// Implement your logic here
+	id := req.TransactionId
+	c.transactionMap[int(id)].replyCh <- true
 	return &emptypb.Empty{}, nil
 }
 
