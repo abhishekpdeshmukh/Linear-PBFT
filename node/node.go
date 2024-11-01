@@ -49,8 +49,8 @@ type Node struct {
 type Log struct {
 	sequenceNumber   int
 	transactionID    int
-	prePrepareMsgLog []*pb.PrePrepareMessage
-	prepareMsgLog    []*pb.PrepareMessage
+	prePrepareMsgLog []*pb.PrePrepareRequest
+	prepareMsgLog    []*pb.PrepareMessageRequest
 	commitMsgLog     []*pb.CommitMessage
 	transaction      *pb.Transaction
 	digest           []byte
@@ -118,7 +118,7 @@ func transactionDigest(tx *pb.Transaction) ([]byte, error) {
 }
 
 func (node *Node) SendTransaction(ctx context.Context, req *pb.TransactionRequest) (*emptypb.Empty, error) {
-	fmt.Println("Received Transaction:", req.Transaction)
+	// fmt.Println("Received Transaction:", req.Transaction)
 
 	// Enqueue the transaction
 	if node.isActive && node.isLeader {
@@ -198,14 +198,14 @@ func (node *Node) PrePrepare(ctx context.Context, req *pb.PrePrepareMessageWrapp
 	}
 
 	// Update the log entry's fields as necessary
-	logEntry.prePrepareMsgLog = append(logEntry.prePrepareMsgLog, prepreparemsg)
+	logEntry.prePrepareMsgLog = append(logEntry.prePrepareMsgLog, req.PrePrepareRequest)
 	logEntry.digest = prepreparemsg.TransactionDigest
 
 	// Save the updated log entry back into the map
-	fmt.Println("Log entry Before ")
+	// fmt.Println("Log entry Before ")
 	fmt.Println(node.logs[int(prepreparemsg.SequenceNumber)])
 	node.logs[int(prepreparemsg.SequenceNumber)] = logEntry
-	fmt.Println("Log entry After ")
+	// fmt.Println("Log entry After ")
 	fmt.Println(node.logs[int(prepreparemsg.SequenceNumber)])
 	// Prepare the PrepareMessage to be sent
 
@@ -254,7 +254,7 @@ func (node *Node) Prepare(ctx context.Context, req *pb.PrepareMessageRequest) (*
 			viewNumber:     int(req.PrepareMessage.ViewNumber),
 		}
 	}
-	logEntry.prepareMsgLog = append(logEntry.prepareMsgLog, req.PrepareMessage)
+	logEntry.prepareMsgLog = append(logEntry.prepareMsgLog, req)
 	node.logs[sequenceNum] = logEntry
 
 	// Increment the prepare count and check thresholds
@@ -269,22 +269,22 @@ func (node *Node) Prepare(ctx context.Context, req *pb.PrepareMessageRequest) (*
 // Check prepare thresholds for 2f and 3f+1
 func (node *Node) checkPrepareThresholds(tracker *PrepareTracker) {
 	// Signal 2f prepares
-	if tracker.prepareCount >= 2*tracker.f {
-		select {
-		case tracker.prepareChan <- struct{}{}:
-			fmt.Println("Received 2f Prepare messages")
-		default:
-		}
-	}
-
 	// Signal 3f+1 prepares
 	if tracker.prepareCount >= 3*tracker.f {
 		select {
 		case tracker.quorumChan <- struct{}{}:
-			fmt.Println("Received 3f+1 Prepare messages")
+			fmt.Println("Received 3f Prepare messages in checkPRepare Thresholds")
 		default:
 		}
 	}
+	if tracker.prepareCount >= 2*tracker.f {
+		select {
+		case tracker.prepareChan <- struct{}{}:
+			fmt.Println("Received 2f Prepare messages in check prepare threshholds")
+		default:
+		}
+	}
+
 }
 
 // Monitor prepare timeout and take actions based on received Prepare counts
@@ -301,13 +301,15 @@ func (node *Node) monitorPrepareTimeout(sequenceNum int) {
 			return
 		default:
 			// Timeout reached
-			fmt.Println("Timeout reached for Prepare messages")
+			fmt.Println("Timeout reached for Prepare messages in monitor timeout")
 
 			node.lock.Lock()
 			defer node.lock.Unlock()
 
 			if tracker.prepareCount >= 3*tracker.f {
-				fmt.Println("3f+1 Prepare messages received, committing transaction")
+				fmt.Println("3f+1 Prepare messages received, committing transaction in monitor timeout")
+
+				// sendCollectedPrepare(node, sequenceNum)
 				// Action for 3f+1 case
 			} else if tracker.prepareCount >= 2*tracker.f {
 				fmt.Println("Only 2f Prepare messages received, partial action")
@@ -324,19 +326,67 @@ func (node *Node) monitorPrepareTimeout(sequenceNum int) {
 	case <-tracker.quorumChan:
 		// 3f+1 Prepare messages received before timeout, committing immediately
 		close(done) // Cancel timeout by closing `done`
-		fmt.Println("3f Prepare messages received before timeout, committing immediately")
+		fmt.Println("3f Prepare messages received before timeout, committing immediately in second half of monitor prepare timout")
+		// sendCollectedPrepare(node, sequenceNum)
 		// Action for immediate commit
 
 	case <-tracker.prepareChan:
 		// 2f Prepare messages received, processing accordingly
 		close(done) // Cancel timeout by closing `done`
-		fmt.Println("2f Prepare messages received, processing accordingly")
+		fmt.Println("2f Prepare messages received, processing accordingly in 2nd half of monitor prepare timeout")
+		sendCollectedPrepare(node, sequenceNum)
 		// Action for 2f prepares
 	}
 
 	// delete(node.prepareTrackers, sequenceNum) // Clean up tracker after processing
 }
 
+func sendCollectedPrepare(node *Node, seq int) {
+	fmt.Println("INSIDE sencollected prepare")
+	prepare := &pb.CollectorPrepare{
+		PrepareMessageRequest: node.logs[seq].prepareMsgLog,
+	}
+	digest, _ := transactionDigest(node.logs[seq].transaction)
+	signature := ed25519.Sign(node.privateKey, digest)
+	payLoad := &pb.CollectPrepareRequest{
+		CollectPrepare: prepare,
+		Signature:      signature,
+	}
+	for i := 1; i < 8; i++ {
+		fmt.Println("Loop")
+		if i != int(node.nodeID) {
+			go func(i int) {
+
+				fmt.Println("Sending All Prepare to nodes ", i)
+				c, ctx, conn := setupReplicaSender(i)
+
+				fmt.Println(seq)
+				_, _ = c.CollectedPrepare(ctx, payLoad)
+				conn.Close()
+			}(i)
+		}
+	}
+
+}
+func (node *Node) CollectedPrepare(ctx context.Context, req *pb.CollectPrepareRequest) (*emptypb.Empty, error) {
+	fmt.Println("Outside replicae collected  PREPARE")
+	if len(req.CollectPrepare.PrepareMessageRequest) >= 3*2 {
+		// req.CollectPrepare.PrepareMessageRequest[0].PrepareMessage.TransactionDigest
+		fmt.Println("INSIDE replica collected PREPARE")
+		c, ctx, conn := setupClientSender(0)
+		c.ClientResponse(ctx, &pb.ClientRequest{
+			ClientId:      node.nodeID,
+			TransactionId: req.CollectPrepare.PrepareMessageRequest[0].PrepareMessage.TransactionId,
+		})
+		conn.Close()
+	}
+	return &emptypb.Empty{}, nil
+}
+
+// func (node *Node) ClientResponse(ctx context.Context, req *pb.ClientRequest) (*emptypb.Empty, error) {
+
+//		return &emptypb.Empty{}, nil
+//	}
 func sendCollectorPrepare(node *Node, preparemsg *pb.PrepareMessage) {
 
 	signature := ed25519.Sign(node.privateKey, preparemsg.TransactionDigest)
@@ -511,14 +561,14 @@ func setupClientReceiver(id int, node *Node) {
 
 func (log Log) String() string {
 	return fmt.Sprintf(
-		"Log{sequenceNumber: %d, transactionID: %d, prePrepareMsgLog: %v, prepareMsgLog: %v, commitMsgLog: %v, transaction: %v, digest: %x, viewNumber: %d}",
+		"Log{sequenceNumber: %d, transactionID: %d, prePrepareMsgLog: %v, prepareMsgLog: %v, commitMsgLog: %v, transaction: %v, viewNumber: %d}",
 		log.sequenceNumber,
 		log.transactionID,
 		log.prePrepareMsgLog,
 		log.prepareMsgLog,
 		log.commitMsgLog,
 		log.transaction,
-		log.digest,
+		// log.digest,
 		log.viewNumber,
 	)
 }
