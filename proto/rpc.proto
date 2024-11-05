@@ -7,7 +7,7 @@ import "google/protobuf/empty.proto";
 service ClientService {
     // Client sends a transaction request to the leader (primary)
     rpc SendTransaction(TransactionRequest) returns (google.protobuf.Empty);
-    rpc ClientResponse(ClientRequest) returns (google.protobuf.Empty);
+    rpc ServerResponse(ServerResponseMsg) returns (google.protobuf.Empty);
     rpc ReceivePublicKey(PublicKeyRequest) returns (google.protobuf.Empty);
     rpc Kill(AdminRequest) returns (NodeResponse) {}
     rpc Revive(ReviveRequest)returns(ReviveResponse){}
@@ -51,15 +51,15 @@ message PublicKeyRequest {
 }
 message TransactionRequest {
   int32 setNumber = 1;
-  int32 clientId = 2;       // ID of the client sending the transaction
+  string clientId = 2;       // ID of the client sending the transaction
   int32 transactionId = 3;  // Unique transaction ID
   Transaction transaction = 4;
   bytes signature = 5;        // Client's signature of the transaction digest
 }
 
 message Transaction {
-    int32 sender = 1;          // Sender account
-    int32 receiver = 2;        // Receiver account
+    string sender = 1;          // Sender account
+    string receiver = 2;        // Receiver account
     float amount = 3;           // Amount to transfer
 }
 message Acknowledgment {
@@ -109,8 +109,10 @@ message CollectPrepareRequest {
 message CommitMessage {
   int32 leader_id = 1;       // Leader ID initiating the Commit
   int32 transaction_id = 2;  // Transaction ID for Commit stage
-  int32 view_number = 3;      // Current view number
-  bytes transaction_digest = 4; // Digest of the transaction for validation
+  int32 replica_id =3;
+  int32 view_number = 4;      // Current view number
+  int32 sequence_number = 5;
+  bytes transaction_digest = 6; // Digest of the transaction for validation
 }
 
 message CommitConfirmationMessage {
@@ -125,8 +127,15 @@ message ReplicaAck {
 }
 
 message ClientRequest {
-  int32 client_id = 1;       // Client ID making the request
+  int32 client_id = 1;   
   int32 transaction_id = 2;  // Transaction ID for tracking
+}
+
+
+message ServerResponseMsg { 
+  string client_id = 1;   
+  int32 transaction_id = 2;  // Transaction ID for tracking
+  
 }
 
 message ClientResponseMessage {
