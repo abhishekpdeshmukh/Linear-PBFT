@@ -51,6 +51,17 @@ func transactionDigest(tx *pb.Transaction) ([]byte, error) {
 	hash.Write(data)
 	return hash.Sum(nil), nil
 }
+func BalanceDigest(tx *pb.BalanceResponse) ([]byte, error) {
+	// Serialize the transaction
+	data, err := proto.Marshal(tx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize transaction: %w", err)
+	}
+	// Compute the SHA-256 hash of the transaction data
+	hash := sha256.New()
+	hash.Write(data)
+	return hash.Sum(nil), nil
+}
 
 func (node *Node) SendTransaction(ctx context.Context, req *pb.TransactionRequest) (*emptypb.Empty, error) {
 	// fmt.Println("Received Transaction:", req.Transaction)
@@ -178,18 +189,39 @@ func executionThread(node *Node) {
 			// Execute the transaction and send a reply to the client
 			// updateState(seqCounter)
 			// sendReplyToClient(seqCounter)
-			fmt.Println("INSIDE EXECUTOR")
-			sender := entry.transaction.Transaction.Sender
-			receiver := entry.transaction.Transaction.Receiver
-			amount := entry.transaction.Transaction.Amount
-			node.nodeBalances[sender] -= int(amount)
-			node.nodeBalances[receiver] += int(amount)
-			c, ctx, conn := setupClientSender(0)
-			c.ServerResponse(ctx, &pb.ServerResponseMsg{
-				ClientId:      sender,
-				TransactionId: int32(node.logs[seqCounter].transactionID),
-			})
-			conn.Close()
+			if !node.isbyzantine {
+				fmt.Println("INSIDE EXECUTOR")
+				sender := entry.transaction.Transaction.Sender
+				receiver := entry.transaction.Transaction.Receiver
+				amount := entry.transaction.Transaction.Amount
+				node.nodeBalances[sender] -= int32(amount)
+				node.nodeBalances[receiver] += int32(amount)
+
+				entry.status = "E"
+				node.logs[seqCounter] = entry
+				c, ctx, conn := setupClientSender(0)
+				c.ServerResponse(ctx, &pb.ServerResponseMsg{
+					ClientId:      sender,
+					TransactionId: int32(node.logs[seqCounter].transactionID),
+				})
+				conn.Close()
+				if seqCounter%CheckPoint == 0 {
+					digest, _ := BalanceDigest(&pb.BalanceResponse{
+						Balance: entry.currBalances,
+					})
+					for i := 1; i < 8; i++ {
+						go func(i int, digest []byte, seq int) {
+							c, ctx, conn := setupReplicaSender(i)
+							c.RecieveCheckpoint(ctx, &pb.CheckpointMsg{
+								ReplicaId:      node.nodeID,
+								SequenceNumber: int32(seq),
+								Digest:         digest,
+							})
+							conn.Close()
+						}(i, digest, seqCounter)
+					}
+				}
+			}
 			// Increment the seqCounter to process the next entry
 			seqCounter++
 		}
