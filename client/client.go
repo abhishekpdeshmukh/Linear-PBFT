@@ -155,6 +155,16 @@ func main() {
 					}
 				}
 
+				byzantineServers := byzantineServersMap[currentSetNumber] // Get the list of Byzantine servers for the current set
+				for _, server := range byzantineServers {
+					fmt.Printf("Marking Server %d as Byzantine for this set\n", server)
+					c, ctx, conn := setupClientSender(server)
+					_, err := c.BecomeMalicious(ctx, &emptypb.Empty{})
+					if err != nil {
+						log.Printf("Failed to mark Server %d as Byzantine: %v", server, err)
+					}
+					conn.Close()
+				}
 				// Process transactions for each client
 				var wg sync.WaitGroup
 				for clientID, txs := range clientTransactions {
@@ -203,10 +213,11 @@ func main() {
 
 		case 3:
 			sendKey(publicKey)
-
+			// masterPrivateKey, masterPublicKey, priShares, pubPoly := generateMasterKeyPairAndShares()
+			// fmt.Println(masterPrivateKey)
+			// initiateTSSHandshake(masterPublicKey, priShares, pubPoly)
 		case 4:
 			fmt.Println("Executing: Print Balance on Specific Server")
-			// Placeholder for balance logic
 
 		case 5:
 			fmt.Println("Executing: Print Log for Specific Server")
@@ -214,20 +225,72 @@ func main() {
 
 		case 6:
 			fmt.Println("Executing: Print DB State")
-			// Placeholder for printing the DB state
+
+			// Header for the table
+			fmt.Printf("%-7s %-3s %-3s %-3s %-3s %-3s %-3s %-3s %-3s %-3s %-3s\n",
+				"Server", "A", "B", "C", "D", "E", "F", "G", "H", "I", "J")
+
+			// Iterate over all 7 servers to get their balances
+			for i := 1; i <= 7; i++ {
+				c, ctx, conn := setupClientSender(i) // Set up RPC client for each server
+				balanceResponse, err := c.GetBalance(ctx, &emptypb.Empty{})
+				if err != nil {
+					log.Printf("Failed to get balance from Server %d: %v", i, err)
+					conn.Close()
+					continue
+				}
+				conn.Close()
+
+				// Print balances in the required format
+				balances := balanceResponse.Balance
+				fmt.Printf("%-7s %-3d %-3d %-3d %-3d %-3d %-3d %-3d %-3d %-3d %-3d\n",
+					fmt.Sprintf("S%d", i),
+					balances["A"], balances["B"], balances["C"], balances["D"],
+					balances["E"], balances["F"], balances["G"], balances["H"],
+					balances["I"], balances["J"])
+			}
 
 		case 7:
-			fmt.Println("Executing: Print Transaction Status by Sequence Number")
-			// Placeholder for printing transaction status
+			fmt.Println("Please Enter a valid Sequence Number")
+			var seq int
+			fmt.Print("Enter the sequence number: ")
+			fmt.Scanf("%d", &seq) // Blocks until the user inputs a number and presses Enter
+
+			fmt.Printf("Executing: Print Status for Sequence Number %d\n", seq)
+
+			// Header for the table
+			fmt.Printf("%-7s %-3s %-3s %-3s %-3s %-3s %-3s %-3s\n",
+				"Server", "S1", "S2", "S3", "S4", "S5", "S6", "S7")
+
+			fmt.Printf("%-7s ", "Status")
+
+			// Iterate over all 7 servers to get their status
+			for i := 1; i <= 7; i++ {
+				c, ctx, conn := setupClientSender(i) // Set up RPC client for each server
+				statusResponse, err := c.GetStatus(ctx, &pb.StatusRequest{SequenceNumber: int32(seq)})
+				if err != nil {
+					log.Printf("Failed to get status from Server %d: %v", i, err)
+					conn.Close()
+					fmt.Printf("%-3s ", "X") // Use "X" to indicate an error or unresponsive server
+					continue
+				}
+				conn.Close()
+
+				// Print the status received from the server
+				fmt.Printf("%-3s ", statusResponse.State)
+			}
+			fmt.Println()
 
 		case 8:
 			fmt.Println("Executing: Print View Changes")
 			// Placeholder for printing view change messages
 
 		case 9:
-			fmt.Println("Executing: Spawn All Nodes")
-			// Placeholder for spawning all nodes logic
-
+			// fmt.Println("Executing: Spawn All Nodes")
+			// masterPrivateKey, masterPublicKey, shares, pubPoly := generateMasterKeyPairAndShares(N, F+1)
+			// for i := 0; i < N; i++ {
+			// 	shares[i]
+			// }
 		case 10:
 			fmt.Println("Exiting...")
 			return
