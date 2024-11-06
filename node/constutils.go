@@ -12,3 +12,6 @@ const (
 	F = 2
 	N = 7
 )
+const (
+	CheckPoint = 3
+)
