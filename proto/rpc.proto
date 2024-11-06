@@ -11,6 +11,10 @@ service ClientService {
     rpc ReceivePublicKey(PublicKeyRequest) returns (google.protobuf.Empty);
     rpc Kill(AdminRequest) returns (NodeResponse) {}
     rpc Revive(ReviveRequest)returns(ReviveResponse){}
+    rpc GetBalance(google.protobuf.Empty)returns(BalanceResponse){}
+    rpc GetStatus(StatusRequest)returns(StatusResponse){}
+    rpc BecomeMalicious(google.protobuf.Empty)returns(google.protobuf.Empty){}
+    rpc SendTSSKeys(TSSKeyExchange)returns(google.protobuf.Empty){}
 }
 service PBFTService {
   
@@ -24,14 +28,41 @@ service PBFTService {
 
   // Leader collects Prepare messages and then sends Commit messages to replicas
   rpc Commit(CommitMessage) returns (google.protobuf.Empty);
-
+  rpc RecieveCheckpoint(CheckpointMsg) returns (google.protobuf.Empty);
   rpc RequestViewChange(ViewChangeRequest) returns (ReplicaAck);
   rpc NewView(NewViewMessage) returns (ReplicaAck);
   rpc ReceiveServerPublicKey(PublicKeyRequest) returns (Acknowledgment);
 }
 
+message PubPoly {
+  repeated string coefficients = 1;
+}
+message TSSKeyExchange {
+  bytes master_public_key = 1;
+  bytes private_shares = 2;
+  bytes public_poly_commitments = 3;
+  // repeated bytes public_poly_commitments = 3;
+}
 
+message CheckpointMsg {
+  int32 sequence_number =1;
+  bytes digest = 2; 
+  int32 replica_id =3;
+  bytes signature =4;
+}
+// message state {
+//   map<string, int32> balance =1;
+// }
+message BalanceResponse {
+  map<string, int32> balance = 1;
+}
 
+message StatusRequest {
+  int32 sequence_number = 1;
+}
+message StatusResponse {
+  string state = 1;
+}
 message AdminRequest {
     string command = 1;
 }
