@@ -22,8 +22,16 @@ type CommitTracker struct {
 	timeout     time.Duration // Timeout duration
 	// f           int           // Fault tolerance level
 }
+type CheckPointTracker struct {
+	checkPointCount int
+	checkPointChan  chan struct{} // Channel to signal 2f prepares
+	doneChan        chan struct{} // Channel to indicate timeout
+	quorumChan      chan struct{} // Channel to signal 3f+1 prepares
+	timeout         time.Duration // Timeout duration
+	// f            int           // Fault tolerance level
+}
 
-func NewPrepareTracker(f int, timeout time.Duration) *PrepareTracker {
+func NewPrepareTracker(timeout time.Duration) *PrepareTracker {
 	return &PrepareTracker{
 		prepareCount: 0,
 		prepareChan:  make(chan struct{}, 1),
@@ -34,13 +42,24 @@ func NewPrepareTracker(f int, timeout time.Duration) *PrepareTracker {
 	}
 }
 
-func NewCommitTracker(f int, timeout time.Duration) *CommitTracker {
+func NewCommitTracker(timeout time.Duration) *CommitTracker {
 	return &CommitTracker{
 		commitCount: 0,
 		commitChan:  make(chan struct{}, 1),
 		doneChan:    make(chan struct{}, 1),
 		quorumChan:  make(chan struct{}, 1),
 		timeout:     timeout,
+		// f:           f,
+	}
+}
+
+func NewCheckPointTracker(timeout time.Duration) *CheckPointTracker {
+	return &CheckPointTracker{
+		checkPointCount: 0,
+		checkPointChan:  make(chan struct{}, 1),
+		doneChan:        make(chan struct{}, 1),
+		quorumChan:      make(chan struct{}, 1),
+		timeout:         timeout,
 		// f:           f,
 	}
 }
@@ -69,8 +88,21 @@ func (node *Node) monitorCommitTimeout(sequenceNum int) {
 		// Commit was successful
 		logEntry := node.logs[sequenceNum]
 		logEntry.isCommitted = true
+		logEntry.status = "C"
 		node.logs[sequenceNum] = logEntry
 		node.notifyCh <- struct{}{}
+	}
+}
+func (node *Node) monitorCheckpointTimeout(sequenceNum int) {
+	tracker := node.checkpointTracker[sequenceNum]
+	select {
+	case <-time.After(tracker.timeout):
+		fmt.Println("Check Point Msgs not recieved on time", sequenceNum)
+		// Handle timeout
+	case <-tracker.checkPointChan:
+		fmt.Println("Checkpoint successful for sequence number", sequenceNum)
+		node.lastStableCheckpoint = sequenceNum
+		fmt.Println("Now the last stable checkpoint is ", node.lastStableCheckpoint)
 	}
 }
 
@@ -80,6 +112,16 @@ func (node *Node) checkPrepareThresholds(tracker *PrepareTracker) {
 		select {
 		case tracker.quorumChan <- struct{}{}:
 			fmt.Println("Received 3f Prepare messages")
+		default:
+		}
+	}
+}
+func (node *Node) checkPointThresholds(tracker *CheckPointTracker) {
+	if tracker.checkPointCount >= 2*F {
+		select {
+		case tracker.quorumChan <- struct{}{}:
+			fmt.Println("Received 2f+1 Checkpoint messages")
+
 		default:
 		}
 	}
