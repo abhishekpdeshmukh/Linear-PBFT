@@ -18,23 +18,25 @@ import (
 type Node struct {
 	pb.UnimplementedPBFTServiceServer
 	pb.UnimplementedClientServiceServer
-	nodeID           int32
-	nodeBalances     map[string]int
-	isActive         bool
-	isLeader         bool
-	isbyzantine      bool
-	view             int32
-	publickeys       map[int32][]byte
-	privateKey       ed25519.PrivateKey
-	globalSequence   int
-	transactionQueue chan *pb.TransactionRequest
-	prepareChan      chan struct{}
-	commitChan       chan struct{}
-	notifyCh         chan struct{}
-	lock             sync.Mutex
-	logs             map[int]Log
-	prepareTrackers  map[int]*PrepareTracker // Trackers for each sequence number
-	commitTrackers   map[int]*CommitTracker
+	nodeID               int32
+	nodeBalances         map[string]int32
+	isActive             bool
+	isLeader             bool
+	isbyzantine          bool
+	view                 int32
+	publickeys           map[int32][]byte
+	privateKey           ed25519.PrivateKey
+	globalSequence       int
+	lastStableCheckpoint int
+	transactionQueue     chan *pb.TransactionRequest
+	prepareChan          chan struct{}
+	commitChan           chan struct{}
+	notifyCh             chan struct{}
+	lock                 sync.Mutex
+	logs                 map[int]Log
+	prepareTrackers      map[int]*PrepareTracker // Trackers for each sequence number
+	commitTrackers       map[int]*CommitTracker
+	checkpointTracker    map[int]*CheckPointTracker
 }
 type Log struct {
 	sequenceNumber   int
@@ -42,6 +44,8 @@ type Log struct {
 	prePrepareMsgLog []*pb.PrePrepareRequest
 	prepareMsgLog    []*pb.PrepareMessageRequest
 	commitMsgLog     []*pb.CommitMessage
+	checkpointMsgLog []*pb.CheckpointMsg
+	currBalances     map[string]int32
 	transaction      *pb.TransactionRequest
 	digest           []byte
 	viewNumber       int
@@ -55,7 +59,7 @@ func main() {
 		nodeID:      int32(id),
 		isActive:    true,
 		isbyzantine: false,
-		nodeBalances: map[string]int{
+		nodeBalances: map[string]int32{
 			"A": 10,
 			"B": 10,
 			"C": 10,
@@ -67,17 +71,19 @@ func main() {
 			"I": 10,
 			"J": 10,
 		},
-		view:             1,
-		publickeys:       make(map[int32][]byte),
-		logs:             make(map[int]Log),
-		prepareTrackers:  make(map[int]*PrepareTracker),
-		commitTrackers:   make(map[int]*CommitTracker),
-		transactionQueue: make(chan *pb.TransactionRequest, 100),
-		globalSequence:   0,
-		prepareChan:      make(chan struct{}, 1),
-		commitChan:       make(chan struct{}, 1),
-		notifyCh:         make(chan struct{}, 1),
-		lock:             sync.Mutex{},
+		view:                 1,
+		publickeys:           make(map[int32][]byte),
+		logs:                 make(map[int]Log),
+		prepareTrackers:      make(map[int]*PrepareTracker),
+		commitTrackers:       make(map[int]*CommitTracker),
+		checkpointTracker:    make(map[int]*CheckPointTracker),
+		transactionQueue:     make(chan *pb.TransactionRequest, 100),
+		globalSequence:       0,
+		lastStableCheckpoint: 0,
+		prepareChan:          make(chan struct{}, 1),
+		commitChan:           make(chan struct{}, 1),
+		notifyCh:             make(chan struct{}, 1),
+		lock:                 sync.Mutex{},
 	}
 	currNode.isLeader = currNode.view%7 == currNode.nodeID
 
@@ -140,6 +146,7 @@ func (node *Node) PrePrepare(ctx context.Context, req *pb.PrePrepareMessageWrapp
 	logEntry.digest = prepreparemsg.TransactionDigest
 	logEntry.transaction = req.TransactionRequest
 	logEntry.transactionID = int(req.TransactionRequest.TransactionId)
+	logEntry.status = "PP"
 	// Save the updated log entry back into the map
 	// fmt.Println("Log entry Before ")
 	// fmt.Println(node.logs[int(prepreparemsg.SequenceNumber)])
@@ -157,8 +164,9 @@ func (node *Node) PrePrepare(ctx context.Context, req *pb.PrePrepareMessageWrapp
 		TransactionDigest: prepreparemsg.TransactionDigest,
 	}
 	// Call sendCollectorPrepare asynchronously
-	fmt.Println("Sending Collector Prepare in reply")
+
 	if !node.isbyzantine {
+		fmt.Println("Sending Collector Prepare in reply")
 		go sendCollectorPrepare(node, preparemsg)
 	}
 	return &emptypb.Empty{}, nil
@@ -173,7 +181,7 @@ func (node *Node) Prepare(ctx context.Context, req *pb.PrepareMessageRequest) (*
 
 	tracker, exists := node.prepareTrackers[sequenceNum]
 	if !exists {
-		tracker = NewPrepareTracker(2, time.Second*2) // Example with f=2 and 10s timeout
+		tracker = NewPrepareTracker(time.Second * 2) // Example with f=2 and 10s timeout
 		node.prepareTrackers[sequenceNum] = tracker
 		fmt.Println("Initializing new PrepareTracker for SequenceNum:", sequenceNum)
 
@@ -212,12 +220,12 @@ func (node *Node) Prepare(ctx context.Context, req *pb.PrepareMessageRequest) (*
 }
 
 func (node *Node) CollectedPrepare(ctx context.Context, req *pb.CollectPrepareRequest) (*emptypb.Empty, error) {
-	if !node.isActive {
+	if !node.isActive || node.isbyzantine {
 		return &emptypb.Empty{}, nil
 	}
 	fmt.Println("Outside replicae collected  PREPARE")
 	seq := req.CollectPrepare.PrepareMessageRequest[0].PrepareMessage.SequenceNumber
-	if len(req.CollectPrepare.PrepareMessageRequest) >= 3*2 {
+	if len(req.CollectPrepare.PrepareMessageRequest) >= 3*F {
 
 		fmt.Println("Inside Replica Accepting Collected Prepare and doing direct commit because I have 3f Collected Prepare")
 
@@ -226,10 +234,11 @@ func (node *Node) CollectedPrepare(ctx context.Context, req *pb.CollectPrepareRe
 		logEntry.prepareMsgLog = append(logEntry.prepareMsgLog, req.CollectPrepare.PrepareMessageRequest...)
 		// Assign the modified struct back to the map
 		logEntry.isCommitted = true
+		logEntry.status = "C"
 		node.logs[int(seq)] = logEntry
 		node.notifyCh <- struct{}{}
 
-	} else if len(req.CollectPrepare.PrepareMessageRequest) >= 2*2 {
+	} else if len(req.CollectPrepare.PrepareMessageRequest) >= 2*F {
 		temp := req.CollectPrepare.PrepareMessageRequest[0].PrepareMessage
 		commitMsg := &pb.CommitMessage{
 			SequenceNumber:    temp.SequenceNumber,
@@ -238,6 +247,9 @@ func (node *Node) CollectedPrepare(ctx context.Context, req *pb.CollectPrepareRe
 			ViewNumber:        temp.ViewNumber,
 			TransactionDigest: temp.TransactionDigest,
 		}
+		logEntry := node.logs[int(seq)]
+		logEntry.status = "P"
+		node.logs[int(seq)] = logEntry
 		fmt.Println("Inside Replica Accepting Collected Prepare and sending commit msgs because I have 2f Collected Prepare")
 		for i := 1; i < 8; i++ {
 
@@ -266,13 +278,40 @@ func (node *Node) Commit(ctx context.Context, req *pb.CommitMessage) (*emptypb.E
 	// Retrieve or initialize the CommitTracker
 	tracker, exists := node.commitTrackers[sequenceNum]
 	if !exists {
-		tracker = NewCommitTracker(2, time.Second*10) // Example with f=2
+		tracker = NewCommitTracker(time.Second * 10) // Example with f=2
 		node.commitTrackers[sequenceNum] = tracker
-		go node.monitorCommitTimeout(sequenceNum)
+		if !node.isbyzantine {
+			go node.monitorCommitTimeout(sequenceNum)
+		}
 	}
 	tracker.commitCount++
 	fmt.Println("Commit Count for", sequenceNum, ":", tracker.commitCount)
-	node.checkCommitThresholds(sequenceNum, tracker)
+	if !node.isbyzantine {
+		node.checkCommitThresholds(sequenceNum, tracker)
+	}
+	return &emptypb.Empty{}, nil
+}
+func (node *Node) RecieveCheckpoint(ctx context.Context, req *pb.CheckpointMsg) (*emptypb.Empty, error) {
+	node.lock.Lock()
+	defer node.lock.Unlock()
+	sequenceNum := int(req.SequenceNumber)
+	// Retrieve or initialize the CommitTracker
+	tracker, exists := node.checkpointTracker[sequenceNum]
+	if !exists {
+		tracker = NewCheckPointTracker(time.Second * 10) // Example with f=2
+		node.checkpointTracker[sequenceNum] = tracker
+		if !node.isbyzantine {
+			go node.monitorCheckpointTimeout(sequenceNum)
+		}
+	}
+	tracker.checkPointCount++
+	log := node.logs[sequenceNum]
+	log.checkpointMsgLog = append(log.checkpointMsgLog, req)
+	node.logs[sequenceNum] = log
+	fmt.Println("Checkpoint Count for", sequenceNum, ":", tracker.checkPointCount)
+	if !node.isbyzantine {
+		node.checkPointThresholds(tracker)
+	}
 	return &emptypb.Empty{}, nil
 }
 
@@ -286,11 +325,38 @@ func (s *Node) Kill(ctx context.Context, req *pb.AdminRequest) (*pb.NodeResponse
 	}
 }
 
-func (s *Node) Revive(ctx context.Context, req *pb.ReviveRequest) (*pb.ReviveResponse, error) {
-	s.lock.Lock()
-	defer s.lock.Unlock()
-	s.isActive = true
+func (node *Node) Revive(ctx context.Context, req *pb.ReviveRequest) (*pb.ReviveResponse, error) {
+	node.lock.Lock()
+	defer node.lock.Unlock()
+	node.isActive = true
+	node.isbyzantine = false
 	return &pb.ReviveResponse{
 		Success: true,
+	}, nil
+}
+
+func (node *Node) BecomeMalicious(ctx context.Context, req *emptypb.Empty) (*emptypb.Empty, error) {
+	node.lock.Lock()
+	defer node.lock.Unlock()
+	fmt.Println("Careful I am malicious now")
+	node.isbyzantine = true
+	return &emptypb.Empty{}, nil
+}
+
+func (node *Node) GetBalance(ctx context.Context, req *emptypb.Empty) (*pb.BalanceResponse, error) {
+	node.lock.Lock()
+	defer node.lock.Unlock()
+
+	return &pb.BalanceResponse{
+		Balance: node.nodeBalances,
+	}, nil
+}
+
+func (node *Node) GetStatus(ctx context.Context, req *pb.StatusRequest) (*pb.StatusResponse, error) {
+	node.lock.Lock()
+	defer node.lock.Unlock()
+
+	return &pb.StatusResponse{
+		State: node.logs[int(req.SequenceNumber)].status,
 	}, nil
 }
