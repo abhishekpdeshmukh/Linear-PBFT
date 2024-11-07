@@ -32,7 +32,9 @@ type Node struct {
 	prepareChan          chan struct{}
 	commitChan           chan struct{}
 	notifyCh             chan struct{}
+	processNotify        chan struct{}
 	lock                 sync.Mutex
+	processPool          map[int]bool
 	logs                 map[int]Log
 	prepareTrackers      map[int]*PrepareTracker // Trackers for each sequence number
 	commitTrackers       map[int]*CommitTracker
@@ -74,6 +76,7 @@ func main() {
 		view:                 1,
 		publickeys:           make(map[int32][]byte),
 		logs:                 make(map[int]Log),
+		processPool:          make(map[int]bool),
 		prepareTrackers:      make(map[int]*PrepareTracker),
 		commitTrackers:       make(map[int]*CommitTracker),
 		checkpointTracker:    make(map[int]*CheckPointTracker),
@@ -83,10 +86,11 @@ func main() {
 		prepareChan:          make(chan struct{}, 1),
 		commitChan:           make(chan struct{}, 1),
 		notifyCh:             make(chan struct{}, 1),
+		processNotify:        make(chan struct{}, 100),
 		lock:                 sync.Mutex{},
 	}
 	currNode.isLeader = currNode.view%7 == currNode.nodeID
-
+	go timerThread(currNode)
 	go setupReplicaReceiver(id, currNode)
 	// go setupReplicaSender(id)
 	go setupClientReceiver(id, currNode)
@@ -101,7 +105,8 @@ func main() {
 	sendKey(currNode, publicKey)
 	currNode.StartTransactionProcessor()
 
-	executionThread(currNode)
+	go executionThread(currNode)
+
 	println("Node ", currNode.nodeID, " Working")
 
 	println(currNode.publickeys)
@@ -112,6 +117,8 @@ func main() {
 }
 
 func (node *Node) PrePrepare(ctx context.Context, req *pb.PrePrepareMessageWrapper) (*emptypb.Empty, error) {
+	node.lock.Lock()
+	defer node.lock.Unlock()
 	if !node.isActive {
 		return &emptypb.Empty{}, nil
 	}
@@ -164,7 +171,8 @@ func (node *Node) PrePrepare(ctx context.Context, req *pb.PrePrepareMessageWrapp
 		TransactionDigest: prepreparemsg.TransactionDigest,
 	}
 	// Call sendCollectorPrepare asynchronously
-
+	node.processPool[int(preparemsg.SequenceNumber)] = true
+	node.processNotify <- struct{}{}
 	if !node.isbyzantine {
 		fmt.Println("Sending Collector Prepare in reply")
 		go sendCollectorPrepare(node, preparemsg)
