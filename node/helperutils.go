@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"fmt"
+	"time"
 
 	pb "github.com/abhishekpdeshmukh/LINEAR-PBFT/proto"
 	"google.golang.org/protobuf/proto"
@@ -171,7 +172,55 @@ func sendPreprepare(node *Node, req *pb.TransactionRequest) {
 	}
 
 }
+func timerThread(node *Node) {
+	for {
+		fmt.Println("I AM INSIDE THE TIMER THREAD")
+		<-node.processNotify // Wait for notification to start the timer
 
+		var currentSeq int
+		var timer *time.Timer
+
+		// Start the inner loop for processing
+		for {
+
+			// Check if the process pool is empty
+			if len(node.processPool) == 0 {
+
+				fmt.Println("Hello All my processing is done")
+				break
+			}
+
+			// Get any sequence number from the pool to monitor
+			for seq := range node.processPool {
+				currentSeq = seq
+				break
+			}
+
+			// Start the timer for the current sequence number
+			timer = time.NewTimer(5 * time.Second) // Set the timeout duration
+
+			<-timer.C // Wait for the timer to expire
+
+			// Check if the sequence number is still in the process pool
+			if _, exists := node.processPool[currentSeq]; exists {
+				fmt.Printf("Timeout reached for sequence %d: Initiating view change\n", currentSeq)
+				// Initiate view change logic here
+
+				break // Exit the inner loop
+			} else {
+				fmt.Printf("Sequence %d processed before timeout\n", currentSeq)
+				// Check if the pool is empty
+				if len(node.processPool) == 0 {
+
+					fmt.Println("All processing done, breaking out of the loop")
+					break // Exit the inner loop
+				}
+
+				// Otherwise, restart the timer for the next sequence number
+			}
+		}
+	}
+}
 func executionThread(node *Node) {
 	seqCounter := 1
 
@@ -196,7 +245,7 @@ func executionThread(node *Node) {
 				amount := entry.transaction.Transaction.Amount
 				node.nodeBalances[sender] -= int32(amount)
 				node.nodeBalances[receiver] += int32(amount)
-
+				delete(node.processPool, seqCounter)
 				entry.status = "E"
 				node.logs[seqCounter] = entry
 				c, ctx, conn := setupClientSender(0)
@@ -205,6 +254,7 @@ func executionThread(node *Node) {
 					TransactionId: int32(node.logs[seqCounter].transactionID),
 				})
 				conn.Close()
+
 				if seqCounter%CheckPoint == 0 {
 					digest, _ := BalanceDigest(&pb.BalanceResponse{
 						Balance: entry.currBalances,
