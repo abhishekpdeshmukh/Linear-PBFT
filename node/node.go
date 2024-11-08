@@ -23,6 +23,7 @@ type Node struct {
 	isActive             bool
 	isLeader             bool
 	isbyzantine          bool
+	isViewChangeProcess  bool
 	view                 int32
 	publickeys           map[int32][]byte
 	privateKey           ed25519.PrivateKey
@@ -39,6 +40,7 @@ type Node struct {
 	prepareTrackers      map[int]*PrepareTracker // Trackers for each sequence number
 	commitTrackers       map[int]*CommitTracker
 	checkpointTracker    map[int]*CheckPointTracker
+	viewChangeTracker    ViewChangeTracker
 	timer                *time.Timer
 }
 type Log struct {
@@ -279,7 +281,18 @@ func (node *Node) CollectedPrepare(ctx context.Context, req *pb.CollectPrepareRe
 	return &emptypb.Empty{}, nil
 
 }
-
+func (node *Node) RequestViewChange(ctx context.Context, req *pb.ViewChangeRequest) (*emptypb.Empty, error) {
+	fmt.Println("Got View Change Request from ", req.ReplicaId)
+	fmt.Println("Last Stable Checkpoint ", req.LastStableCheckpoint)
+	fmt.Println("Checkpoint Proof \n", req.CheckpointMsg)
+	fmt.Println("View Change load \n", req.ViewChangeLoad)
+	tracker := node.viewChangeTracker
+	if tracker.viewChangeCount == 0 {
+		node.checkViewChangeThresholds(&tracker)
+	}
+	tracker.viewChangeCount++
+	return &emptypb.Empty{}, nil
+}
 func (node *Node) Commit(ctx context.Context, req *pb.CommitMessage) (*emptypb.Empty, error) {
 	node.lock.Lock()
 	defer node.lock.Unlock()
