@@ -5,6 +5,12 @@ import (
 	"time"
 )
 
+type ViewChangeTracker struct {
+	viewChangeCount       int
+	viewChangeStartChan   chan struct{} // Channel to signal 2f prepares
+	doneChan              chan struct{} // Channel to indicate timeout
+	viewChangeSuccessChan chan struct{} // Channel to signal 3f+1 prepares
+}
 type PrepareTracker struct {
 	prepareCount int
 	prepareChan  chan struct{} // Channel to signal 2f prepares
@@ -31,6 +37,14 @@ type CheckPointTracker struct {
 	// f            int           // Fault tolerance level
 }
 
+func NewViewChangeTracker() *ViewChangeTracker {
+	return &ViewChangeTracker{
+		viewChangeCount:       0,
+		viewChangeStartChan:   make(chan struct{}, 1), // Channel to signal 2f prepares
+		doneChan:              make(chan struct{}, 1), // Channel to indicate timeout
+		viewChangeSuccessChan: make(chan struct{}, 1),
+	}
+}
 func NewPrepareTracker(timeout time.Duration) *PrepareTracker {
 	return &PrepareTracker{
 		prepareCount: 0,
@@ -61,6 +75,25 @@ func NewCheckPointTracker(timeout time.Duration) *CheckPointTracker {
 		quorumChan:      make(chan struct{}, 1),
 		timeout:         timeout,
 		// f:           f,
+	}
+}
+
+func (node *Node) checkViewChangeThresholds(tracker *ViewChangeTracker) {
+	if tracker.viewChangeCount >= 2*F {
+		fmt.Println("Restarting the timer for NEWVIEW MSG")
+		node.timer.Reset(time.Second * 5)
+
+	} else if tracker.viewChangeCount >= F+1 {
+		if !node.isViewChangeProcess {
+			node.isViewChangeProcess = true
+			node.initiateViewChange()
+		}
+		// select {
+		// case tracker.commitChan <- struct{}{}:
+		// 	fmt.Println("Received 2f+1 Commit messages, sending response to client")
+		// 	// sendResponseToClient(node, sequenceNum)
+		// default:
+		// }
 	}
 }
 
