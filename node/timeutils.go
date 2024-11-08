@@ -78,14 +78,24 @@ func NewCheckPointTracker(timeout time.Duration) *CheckPointTracker {
 	}
 }
 
-func (node *Node) checkViewChangeThresholds(tracker *ViewChangeTracker) {
-	if tracker.viewChangeCount >= 2*F {
+func (node *Node) checkViewChangeThresholds(tracker *ViewChangeTracker, nextView int) {
+	fmt.Println("Inside View Change Tracker my current count is ", tracker.viewChangeCount)
+	if node.timer != nil {
+		return
+	}
+	if tracker.viewChangeCount >= 2*F+1 {
 		fmt.Println("Restarting the timer for NEWVIEW MSG")
-		node.timer.Reset(time.Second * 5)
+		if nextView%N == int(node.nodeID) {
+			node.sendNewView()
+		} else {
+			node.startOrResetTimer(time.Second * 6)
+		}
 
 	} else if tracker.viewChangeCount >= F+1 {
+		fmt.Println("Inside this condition of F+1")
 		if !node.isViewChangeProcess {
 			node.isViewChangeProcess = true
+			fmt.Println("Hello I am staring a view change cause i got F+1 view change msgs")
 			node.initiateViewChange()
 		}
 		// select {
