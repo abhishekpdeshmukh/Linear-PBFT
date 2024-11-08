@@ -206,6 +206,7 @@ func timerThread(node *Node) {
 			// Check if the sequence number is still in the process pool
 			if _, exists := node.processPool[currentSeq]; exists {
 				fmt.Printf("Timeout reached for sequence %d: Initiating view change\n", currentSeq)
+				node.processPool = make(map[int]bool) // NEw addition check later
 				if !node.isViewChangeProcess {
 					node.isViewChangeProcess = true
 					node.stopTimer()
@@ -327,5 +328,12 @@ func (node *Node) initiateViewChange() {
 			c.RequestViewChange(ctx, viewChangeReq)
 			conn.Close()
 		}(i, viewChangeReq)
+	}
+}
+
+func (node *Node) sendNewView() {
+	
+	for i := 0; i < 8; i++ {
+
 	}
 }
