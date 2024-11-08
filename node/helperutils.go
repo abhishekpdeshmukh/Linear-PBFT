@@ -178,15 +178,14 @@ func timerThread(node *Node) {
 		<-node.processNotify // Wait for notification to start the timer
 
 		var currentSeq int
-		var timer *time.Timer
 
 		// Start the inner loop for processing
 		for {
 
 			// Check if the process pool is empty
 			if len(node.processPool) == 0 {
-
 				fmt.Println("Hello All my processing is done")
+				node.stopTimer() // Stop the timer if there's nothing to process
 				break
 			}
 
@@ -196,31 +195,47 @@ func timerThread(node *Node) {
 				break
 			}
 
-			// Start the timer for the current sequence number
-			timer = time.NewTimer(5 * time.Second) // Set the timeout duration
+			// Start or reset the timer for the current sequence number
+			node.startOrResetTimer(5 * time.Second)
 
-			<-timer.C // Wait for the timer to expire
+			<-node.timer.C // Wait for the timer to expire
 
 			// Check if the sequence number is still in the process pool
 			if _, exists := node.processPool[currentSeq]; exists {
 				fmt.Printf("Timeout reached for sequence %d: Initiating view change\n", currentSeq)
 				// Initiate view change logic here
 
-				break // Exit the inner loop
+				node.stopTimer() // Stop the timer as view change is initiated
+				break            // Exit the inner loop
 			} else {
 				fmt.Printf("Sequence %d processed before timeout\n", currentSeq)
 				// Check if the pool is empty
 				if len(node.processPool) == 0 {
-
 					fmt.Println("All processing done, breaking out of the loop")
-					break // Exit the inner loop
+					node.stopTimer() // Stop the timer
+					break            // Exit the inner loop
 				}
-
 				// Otherwise, restart the timer for the next sequence number
 			}
 		}
 	}
 }
+func (node *Node) startOrResetTimer(duration time.Duration) {
+	// If a timer already exists, stop it before creating a new one
+	if node.timer != nil {
+		node.timer.Stop()
+	}
+	// Create and start a new timer
+	node.timer = time.NewTimer(duration)
+}
+
+func (node *Node) stopTimer() {
+	if node.timer != nil {
+		node.timer.Stop()
+		node.timer = nil // Clear the timer reference
+	}
+}
+
 func executionThread(node *Node) {
 	seqCounter := 1
 
