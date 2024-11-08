@@ -181,7 +181,10 @@ func timerThread(node *Node) {
 
 		// Start the inner loop for processing
 		for {
-
+			if node.isViewChangeProcess {
+				time.Sleep(time.Second * 1)
+				break
+			}
 			// Check if the process pool is empty
 			if len(node.processPool) == 0 {
 				fmt.Println("Hello All my processing is done")
@@ -203,10 +206,13 @@ func timerThread(node *Node) {
 			// Check if the sequence number is still in the process pool
 			if _, exists := node.processPool[currentSeq]; exists {
 				fmt.Printf("Timeout reached for sequence %d: Initiating view change\n", currentSeq)
-				// Initiate view change logic here
-
-				node.stopTimer() // Stop the timer as view change is initiated
-				break            // Exit the inner loop
+				if !node.isViewChangeProcess {
+					node.isViewChangeProcess = true
+					node.stopTimer()
+					node.initiateViewChange()
+				}
+				// Stop the timer as view change is initiated
+				break // Exit the inner loop
 			} else {
 				fmt.Printf("Sequence %d processed before timeout\n", currentSeq)
 				// Check if the pool is empty
@@ -224,6 +230,7 @@ func (node *Node) startOrResetTimer(duration time.Duration) {
 	// If a timer already exists, stop it before creating a new one
 	if node.timer != nil {
 		node.timer.Stop()
+		fmt.Println("Timer starts tik----tok----tik---tok")
 	}
 	// Create and start a new timer
 	node.timer = time.NewTimer(duration)
@@ -232,6 +239,7 @@ func (node *Node) startOrResetTimer(duration time.Duration) {
 func (node *Node) stopTimer() {
 	if node.timer != nil {
 		node.timer.Stop()
+		fmt.Println("Stopped the Bloody Timer!!!")
 		node.timer = nil // Clear the timer reference
 	}
 }
@@ -290,5 +298,34 @@ func executionThread(node *Node) {
 			// Increment the seqCounter to process the next entry
 			seqCounter++
 		}
+	}
+}
+
+func (node *Node) initiateViewChange() {
+	var viewChangeLoadReq []*pb.ViewChangeLoad
+	for i := node.lastStableCheckpoint + 1; i <= len(node.logs)-1; i++ {
+		if !node.isbyzantine && len(node.logs[i].prepareMsgLog) >= 2*F {
+			viewload := &pb.ViewChangeLoad{
+				PrePrepareReq: node.logs[i].prePrepareMsgLog[0],
+				PrepareReq:    node.logs[i].prepareMsgLog,
+			}
+			viewChangeLoadReq = append(viewChangeLoadReq, viewload)
+		}
+	}
+
+	viewChangeReq := &pb.ViewChangeRequest{
+		ReplicaId:            node.nodeID,
+		NextView:             node.view + 1,
+		LastStableCheckpoint: int32(node.lastStableCheckpoint),
+		CheckpointMsg:        node.logs[node.lastStableCheckpoint].checkpointMsgLog,
+		ViewChangeLoad:       viewChangeLoadReq,
+	}
+
+	for i := 1; i < 8; i++ {
+		go func(i int, viewChangeReq *pb.ViewChangeRequest) {
+			c, ctx, conn := setupReplicaSender(i)
+			c.RequestViewChange(ctx, viewChangeReq)
+			conn.Close()
+		}(i, viewChangeReq)
 	}
 }
