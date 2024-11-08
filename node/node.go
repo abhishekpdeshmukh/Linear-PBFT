@@ -37,6 +37,7 @@ type Node struct {
 	lock                 sync.Mutex
 	processPool          map[int]bool
 	logs                 map[int]Log
+	
 	prepareTrackers      map[int]*PrepareTracker // Trackers for each sequence number
 	commitTrackers       map[int]*CommitTracker
 	checkpointTracker    map[int]*CheckPointTracker
@@ -282,15 +283,18 @@ func (node *Node) CollectedPrepare(ctx context.Context, req *pb.CollectPrepareRe
 
 }
 func (node *Node) RequestViewChange(ctx context.Context, req *pb.ViewChangeRequest) (*emptypb.Empty, error) {
+	node.lock.Lock()
+	defer node.lock.Unlock()
+
 	fmt.Println("Got View Change Request from ", req.ReplicaId)
 	fmt.Println("Last Stable Checkpoint ", req.LastStableCheckpoint)
 	fmt.Println("Checkpoint Proof \n", req.CheckpointMsg)
 	fmt.Println("View Change load \n", req.ViewChangeLoad)
-	tracker := node.viewChangeTracker
-	if tracker.viewChangeCount == 0 {
-		node.checkViewChangeThresholds(&tracker)
-	}
-	tracker.viewChangeCount++
+
+	// Directly reference node.viewChangeTracker to modify the original
+	node.viewChangeTracker.viewChangeCount++
+	node.checkViewChangeThresholds(&node.viewChangeTracker, int(req.NextView))
+
 	return &emptypb.Empty{}, nil
 }
 func (node *Node) Commit(ctx context.Context, req *pb.CommitMessage) (*emptypb.Empty, error) {
