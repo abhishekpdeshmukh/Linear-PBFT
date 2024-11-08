@@ -22,11 +22,12 @@ func getClientHandler(id string) *ClientHandler {
 	defer clientHandlersMu.Unlock()
 
 	// Check if a handler already exists for the client
-	if handler, exists := clientHandlers[id]; !exists {
+	handler, exists := clientHandlers[id]
+	if !exists {
 		// If not, create a new handler with the simplified structure
 		handler = &ClientHandler{
 			replyCh:     make(chan bool, F+1),
-			timer:       time.NewTimer(5 * time.Second),
+			timer:       time.NewTimer(10 * time.Second),
 			clientID:    id,
 			processing:  false,
 			processDone: make(chan struct{}, 1),
@@ -37,7 +38,7 @@ func getClientHandler(id string) *ClientHandler {
 		go handler.monitorReplies()
 	}
 
-	return clientHandlers[id]
+	return handler
 }
 
 func (ch *ClientHandler) monitorReplies() {
