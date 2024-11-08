@@ -29,8 +29,8 @@ service PBFTService {
   // Leader collects Prepare messages and then sends Commit messages to replicas
   rpc Commit(CommitMessage) returns (google.protobuf.Empty);
   rpc RecieveCheckpoint(CheckpointMsg) returns (google.protobuf.Empty);
-  rpc RequestViewChange(ViewChangeRequest) returns (ReplicaAck);
-  rpc NewView(NewViewMessage) returns (ReplicaAck);
+  rpc RequestViewChange(ViewChangeRequest) returns (google.protobuf.Empty);
+  rpc NewView(NewViewMessage) returns (google.protobuf.Empty);
   rpc ReceiveServerPublicKey(PublicKeyRequest) returns (Acknowledgment);
 }
 
@@ -177,12 +177,19 @@ message ClientResponseMessage {
 
 message ViewChangeRequest {
   int32 replica_id = 1;      // ID of the replica initiating view change
-  int32 view_number = 2;      // Proposed new view number
-  int32 last_stable_checkpoint = 3; // Latest checkpoint digest
+  int32 next_view = 2;      // Proposed new view number
+  repeated CheckpointMsg checkpoint_msg = 3;
+  repeated ViewChangeLoad view_change_load =4;
+  int32 last_stable_checkpoint = 5; // Latest checkpoint digest
 }
 
 message NewViewMessage {
   int32 new_leader_id = 1;   // ID of the new leader
-  int32 view_number = 2;      // Updated view number
-  repeated bytes view_change_messages = 3; // Collection of view change messages
+  int32 next_view = 2;      // Updated view number
+  repeated ViewChangeRequest view_change_req= 3; // Collection of view change messages
+  repeated PrePrepareRequest pre_prepare_req =4;
+}
+message ViewChangeLoad {
+  PrePrepareRequest pre_prepare_req =1;
+  repeated PrepareMessageRequest prepare_req =2;
 }
