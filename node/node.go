@@ -39,6 +39,7 @@ type Node struct {
 	prepareTrackers      map[int]*PrepareTracker // Trackers for each sequence number
 	commitTrackers       map[int]*CommitTracker
 	checkpointTracker    map[int]*CheckPointTracker
+	timer                *time.Timer
 }
 type Log struct {
 	sequenceNumber   int
