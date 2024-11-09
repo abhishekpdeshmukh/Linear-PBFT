@@ -13,5 +13,5 @@ const (
 	N = 7
 )
 const (
-	CheckPoint = 3
+	CheckPoint = 15
 )
