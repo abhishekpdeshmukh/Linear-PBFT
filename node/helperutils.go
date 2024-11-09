@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
@@ -71,6 +72,16 @@ func (node *Node) SendTransaction(ctx context.Context, req *pb.TransactionReques
 	if node.isActive && node.isLeader {
 		node.transactionQueue <- req
 		fmt.Println("Transaction enqueued")
+	} else if node.isActive {
+		fmt.Println("DOING THE LEADER A FAVOUR BY SENDING THIS TO HIM")
+		fmt.Println("SENDING IT TO ", node.ServerMapping[node.view%N])
+		fmt.Println("My current View is ", node.view)
+		fmt.Println("Am I a leader ", node.isLeader)
+		// go func(i int, req *pb.TransactionRequest) {
+		// 	c, ctx, conn := setupReplicaSender(i)
+		// 	c.SendToNewLeader(ctx, req)
+		// 	conn.Close()
+		// }(int(node.ServerMapping[node.view%F]), req)
 	}
 
 	return &emptypb.Empty{}, nil
@@ -87,6 +98,7 @@ func (node *Node) StartTransactionProcessor() {
 }
 
 func (node *Node) processTransaction(req *pb.TransactionRequest) {
+	fmt.Println("Inside PRocess Transaction about to grab locks")
 	node.lock.Lock()
 	defer node.lock.Unlock()
 
@@ -111,7 +123,7 @@ func sendCollectorPrepare(node *Node, preparemsg *pb.PrepareMessage) {
 		c, ctx, conn := setupReplicaSender(i)
 		c.Prepare(ctx, prepareReq)
 		conn.Close()
-	}(int(node.view%7), prepareReq)
+	}(int(node.ServerMapping[node.view%F]), prepareReq)
 }
 
 func sendPreprepare(node *Node, req *pb.TransactionRequest) {
@@ -150,6 +162,8 @@ func sendPreprepare(node *Node, req *pb.TransactionRequest) {
 		viewNumber:     int(node.view),
 	}
 	node.logs[node.globalSequence] = logEntry
+	node.processPool[int(req.TransactionId)] = true
+
 	for i := 1; i < 8; i++ {
 		fmt.Println("Loop")
 		if i != int(node.nodeID) {
@@ -204,6 +218,7 @@ func timerThread(node *Node) {
 			<-node.timer.C // Wait for the timer to expire
 
 			// Check if the sequence number is still in the process pool
+			fmt.Println(node.processPool)
 			if _, exists := node.processPool[currentSeq]; exists {
 				fmt.Printf("Timeout reached for sequence %d: Initiating view change\n", currentSeq)
 				node.processPool = make(map[int]bool) // NEw addition check later
@@ -227,6 +242,7 @@ func timerThread(node *Node) {
 		}
 	}
 }
+
 func (node *Node) startOrResetTimer(duration time.Duration) {
 	// If a timer already exists, stop it before creating a new one
 	if node.timer != nil {
@@ -276,6 +292,7 @@ func executionThread(node *Node) {
 				c.ServerResponse(ctx, &pb.ServerResponseMsg{
 					ClientId:      sender,
 					TransactionId: int32(node.logs[seqCounter].transactionID),
+					View:          node.view,
 				})
 				conn.Close()
 
@@ -331,9 +348,123 @@ func (node *Node) initiateViewChange() {
 	}
 }
 
-func (node *Node) sendNewView() {
-	
-	for i := 0; i < 8; i++ {
-
+func (node *Node) sendNewView(newView int) {
+	fmt.Println("Hi I am the leader sending NEw View MSGS to everyone")
+	node.lock.Lock()
+	defer node.lock.Unlock()
+	viewchangeReq := node.viewChangeLog[newView]
+	PrePrepare := make([]*pb.PrePrepareRequest, 100)
+	node.isLeader = true
+	maxCheckpoint := 0
+	for _, viewChange := range viewchangeReq {
+		maxCheckpoint = max(maxCheckpoint, int(viewChange.LastStableCheckpoint))
+		if len(viewChange.ViewChangeLoad) > 0 {
+			oldPreprepare := viewChange.ViewChangeLoad[0].PrePrepareReq
+			newPreprepare := &pb.PrePrepareRequest{
+				PrePrepareMessage: &pb.PrePrepareMessage{
+					LeaderId:          node.nodeID,
+					TransactionId:     oldPreprepare.PrePrepareMessage.TransactionId,
+					ViewNumber:        int32(newView),
+					SequenceNumber:    oldPreprepare.PrePrepareMessage.SequenceNumber,
+					TransactionDigest: oldPreprepare.PrePrepareMessage.TransactionDigest,
+				},
+				Signature: oldPreprepare.Signature,
+			}
+			PrePrepare = append(PrePrepare, newPreprepare)
+		}
 	}
+	newViewMsg := &pb.NewViewMessage{
+		NextView:      int32(newView),
+		NewLeaderId:   node.ServerMapping[int32(newView)%N],
+		ViewChangeReq: node.viewChangeLog[newView],
+		PrePrepareReq: PrePrepare,
+		MaxCheckpoint: int32(maxCheckpoint),
+	}
+	for i := 0; i < 8; i++ {
+		if i != int(node.nodeID) {
+			go func(i int, viewChangeReq *pb.NewViewMessage) {
+				c, ctx, conn := setupReplicaSender(i)
+				c.NewView(ctx, newViewMsg)
+				conn.Close()
+			}(i, newViewMsg)
+		}
+	}
+}
+
+func (node *Node) AcceptNewViewPrePrepare(req *pb.PrePrepareRequest) {
+
+	fmt.Println("Hi, I accept the new Preprepare sent by ", req.PrePrepareMessage.LeaderId)
+	node.lock.Lock()
+	defer node.lock.Unlock()
+	node.viewChangeTracker.viewChangeCount = 0
+	if !node.isActive {
+		// return &emptypb.Empty{}, nil
+		return
+	}
+	prepreparemsg := req.PrePrepareMessage
+	signature1 := req.Signature
+
+	// Retrieve the Log entry for this SequenceNumber, or create a new one if it doesn't exist
+	logEntry, exists := node.logs[int(prepreparemsg.SequenceNumber)]
+	if !exists {
+		logEntry = Log{} // Initialize a new Log entry if it doesn't exist
+	} else {
+		signature2 := logEntry.transaction.Signature
+		isValid2 := ed25519.Verify(node.publickeys[0], prepreparemsg.TransactionDigest, signature2)
+		if !isValid2 {
+			return
+		}
+	}
+	// Verify signatures
+	isValid1 := ed25519.Verify(node.publickeys[prepreparemsg.LeaderId], prepreparemsg.TransactionDigest, signature1)
+
+	fmt.Println("Signature Verification done")
+	// If either signature is invalid, return early
+	if !isValid1 {
+		return
+	}
+
+	// Check if the view number matches the node's view
+	if prepreparemsg.ViewNumber != node.view {
+		fmt.Println("Sorry Views dont Match")
+		return
+	}
+	fmt.Println("View Verification done")
+	// Check for an existing digest and ensure it matches the incoming TransactionDigest
+	if logEntry.digest != nil && !bytes.Equal(logEntry.digest, prepreparemsg.TransactionDigest) {
+		fmt.Println("Sorry Digest dont match")
+		return
+	}
+	// Update the log entry's fields as necessary
+	logEntry.prePrepareMsgLog = append(logEntry.prePrepareMsgLog, req)
+	logEntry.digest = prepreparemsg.TransactionDigest
+	// logEntry.transaction = req.TransactionRequest
+	logEntry.transactionID = int(req.PrePrepareMessage.TransactionId)
+	logEntry.status = "PP"
+	// Save the updated log entry back into the map
+	// fmt.Println("Log entry Before ")
+	// fmt.Println(node.logs[int(prepreparemsg.SequenceNumber)])
+	node.logs[int(prepreparemsg.SequenceNumber)] = logEntry
+	fmt.Println("Log entry After appending inside PREPREPARE")
+	fmt.Println(node.logs[int(prepreparemsg.SequenceNumber)])
+	// Prepare the PrepareMessage to be sent
+
+	fmt.Println(node.logs[int(prepreparemsg.SequenceNumber)])
+	preparemsg := &pb.PrepareMessage{
+		ReplicaId:         node.nodeID,
+		TransactionId:     prepreparemsg.TransactionId,
+		ViewNumber:        prepreparemsg.ViewNumber,
+		SequenceNumber:    prepreparemsg.SequenceNumber,
+		TransactionDigest: prepreparemsg.TransactionDigest,
+	}
+	// Call sendCollectorPrepare asynchronously
+	node.processPool[int(preparemsg.SequenceNumber)] = true
+	node.processNotify <- struct{}{}
+	if !node.isbyzantine {
+		fmt.Println("Sending Collector Prepare in reply")
+		go sendCollectorPrepare(node, preparemsg)
+	}
+}
+func synchCheckpoint(checkpointSeq int) {
+	fmt.Println("Helloo In the Synch checkpoint till  ", checkpointSeq)
 }
