@@ -72,7 +72,7 @@ func main() {
 		fmt.Println("6. Print DB State")                              // New option
 		fmt.Println("7. Print Transaction Status by Sequence Number") // New option
 		fmt.Println("8. Print View Changes")                          // New option
-		fmt.Println("9. Spawn All Nodes")
+		fmt.Println("9. Flush")
 		fmt.Println("10. Exit")
 
 		// Read user's choice
@@ -179,7 +179,7 @@ func main() {
 							handler.mu.Lock()
 							for handler.processing {
 								handler.mu.Unlock()
-								time.Sleep(10 * time.Second)
+								<-handler.processDone // Wait for the current transaction to complete
 								handler.mu.Lock()
 							}
 
@@ -187,7 +187,7 @@ func main() {
 							handler.currentTx = tx
 							handler.replyCount = 0
 							handler.processing = true
-							handler.timer.Reset(8 * time.Second) // Restart the timer for the new transaction
+							handler.timer.Reset(10 * time.Second) // Restart the timer for the new transaction
 							handler.mu.Unlock()
 
 							// Send transaction to primary
@@ -286,11 +286,13 @@ func main() {
 			// Placeholder for printing view change messages
 
 		case 9:
-			// fmt.Println("Executing: Spawn All Nodes")
-			// masterPrivateKey, masterPublicKey, shares, pubPoly := generateMasterKeyPairAndShares(N, F+1)
-			// for i := 0; i < N; i++ {
-			// 	shares[i]
-			// }
+			fmt.Println("Flushing Everything")
+			for i := 1; i <= 7; i++ {
+				c, ctx, conn := setupClientSender(i) // Set up RPC client for each server
+				c.Flush(ctx, &emptypb.Empty{})
+				conn.Close()
+			}
+			fmt.Println("Flushed Everything")
 		case 10:
 			fmt.Println("Exiting...")
 			return
@@ -307,6 +309,7 @@ func (c *Client) ServerResponse(ctx context.Context, req *pb.ServerResponseMsg) 
 	// Find the appropriate client handler
 	clientHandlersMu.Lock()
 	handler, exists := clientHandlers[req.ClientId]
+	c.view = req.View
 	clientHandlersMu.Unlock()
 
 	if exists {
@@ -314,8 +317,7 @@ func (c *Client) ServerResponse(ctx context.Context, req *pb.ServerResponseMsg) 
 		defer handler.mu.Unlock()
 
 		// Check if the transaction ID matches the current transaction being processed
-		// req.TransactionId == handler.currentTx.TransactionId
-		if handler.processing {
+		if handler.processing && req.TransactionId == handler.currentTx.TransactionId {
 			// Increment the reply count
 			handler.replyCount++
 			fmt.Printf("Client %s: Current reply count for transaction %d is %d\n", req.ClientId, req.TransactionId, handler.replyCount)
