@@ -64,6 +64,10 @@ func (client *Client) ReceivePublicKey(ctx context.Context, req *pb.PublicKeyReq
 
 func broadcastTransaction(tx *pb.TransactionRequest) {
 	// Implement broadcasting to all available nodes
+	fmt.Println("Broadcasting transaction from client ", tx.ClientId)
+
+	// fmt.Println(tx)
+
 	for i := 1; i <= 7; i++ {
 		go func(serverID int) {
 			c, ctx, conn := setupClientSender(serverID)
@@ -74,6 +78,7 @@ func broadcastTransaction(tx *pb.TransactionRequest) {
 			}
 		}(i)
 	}
+
 }
 
 func generateMasterKeyPairAndShares() (kyber.Scalar, kyber.Point, []*share.PriShare, *share.PubPoly) {
