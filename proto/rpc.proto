@@ -14,10 +14,11 @@ service ClientService {
     rpc GetBalance(google.protobuf.Empty)returns(BalanceResponse){}
     rpc GetStatus(StatusRequest)returns(StatusResponse){}
     rpc BecomeMalicious(google.protobuf.Empty)returns(google.protobuf.Empty){}
+    rpc Flush(google.protobuf.Empty)returns(google.protobuf.Empty) {} 
     rpc SendTSSKeys(TSSKeyExchange)returns(google.protobuf.Empty){}
 }
 service PBFTService {
-  
+  rpc SendToNewLeader(TransactionRequest) returns (google.protobuf.Empty);
   // Leader (collector) multicasts the transaction to other replicas in the PrePrepare stage
   rpc PrePrepare(PrePrepareMessageWrapper) returns (google.protobuf.Empty);
 
@@ -166,7 +167,7 @@ message ClientRequest {
 message ServerResponseMsg { 
   string client_id = 1;   
   int32 transaction_id = 2;  // Transaction ID for tracking
-  
+  int32 view = 3;
 }
 
 message ClientResponseMessage {
@@ -188,6 +189,7 @@ message NewViewMessage {
   int32 next_view = 2;      // Updated view number
   repeated ViewChangeRequest view_change_req= 3; // Collection of view change messages
   repeated PrePrepareRequest pre_prepare_req =4;
+  int32 maxCheckpoint  = 5;
 }
 message ViewChangeLoad {
   PrePrepareRequest pre_prepare_req =1;
