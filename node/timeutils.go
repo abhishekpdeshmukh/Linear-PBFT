@@ -83,21 +83,38 @@ func (node *Node) checkViewChangeThresholds(tracker *ViewChangeTracker, nextView
 	if node.timer != nil {
 		return
 	}
-	if tracker.viewChangeCount >= 2*F+1 {
-		fmt.Println("Restarting the timer for NEWVIEW MSG")
-		if nextView%N == int(node.nodeID) {
-			node.sendNewView()
+	if tracker.viewChangeCount >= 2*F+1 && node.isViewChangeProcess {
+		fmt.Println("Restarting the timer waiting for NEWVIEW MSG")
+		node.view = int32(nextView)
+		fmt.Println("My current View is ", node.view)
+		fmt.Println("Next view is ", nextView, " and My node id is ", node.nodeID)
+		fmt.Println("Next Leader should be ", node.ServerMapping[int32(nextView)%N])
+		if node.ServerMapping[int32(nextView)%N] == node.nodeID {
+			fmt.Println("As a Leader")
+			node.isLeader = true
+			node.viewChangeTracker.viewChangeCount = 0
+			go node.sendNewView(nextView)
+			go node.startOrResetTimer(time.Second * 5)
+			node.isViewChangeProcess = false
 		} else {
-			node.startOrResetTimer(time.Second * 6)
+			fmt.Println("I should not be the leader but i should start the timer ")
+			fmt.Println("My current Leeader status before turning to false is ", node.isLeader)
+			node.isLeader = false
+			go node.startOrResetTimer(time.Second * 5)
+			node.viewChangeTracker.viewChangeCount = 0
+			node.isViewChangeProcess = false
 		}
 
 	} else if tracker.viewChangeCount >= F+1 {
 		fmt.Println("Inside this condition of F+1")
+		fmt.Println("My current view ", node.view)
 		if !node.isViewChangeProcess {
 			node.isViewChangeProcess = true
 			fmt.Println("Hello I am staring a view change cause i got F+1 view change msgs")
-			node.initiateViewChange()
+			go node.initiateViewChange()
 		}
+
+		fmt.Println("I am in a ongoing ViewChange process sorry cant initiate anything")
 		// select {
 		// case tracker.commitChan <- struct{}{}:
 		// 	fmt.Println("Received 2f+1 Commit messages, sending response to client")
