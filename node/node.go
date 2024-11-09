@@ -24,6 +24,7 @@ type Node struct {
 	isLeader             bool
 	isbyzantine          bool
 	isViewChangeProcess  bool
+	lowestNextView       int32
 	view                 int32
 	publickeys           map[int32][]byte
 	privateKey           ed25519.PrivateKey
@@ -37,7 +38,8 @@ type Node struct {
 	lock                 sync.Mutex
 	processPool          map[int]bool
 	logs                 map[int]Log
-	
+	ServerMapping        map[int32]int32
+	viewChangeLog        map[int][]*pb.ViewChangeRequest
 	prepareTrackers      map[int]*PrepareTracker // Trackers for each sequence number
 	commitTrackers       map[int]*CommitTracker
 	checkpointTracker    map[int]*CheckPointTracker
@@ -61,6 +63,7 @@ type Log struct {
 
 func main() {
 	id, _ := strconv.Atoi(os.Args[1])
+
 	currNode := &Node{
 		nodeID:      int32(id),
 		isActive:    true,
@@ -84,6 +87,7 @@ func main() {
 		prepareTrackers:      make(map[int]*PrepareTracker),
 		commitTrackers:       make(map[int]*CommitTracker),
 		checkpointTracker:    make(map[int]*CheckPointTracker),
+		viewChangeLog:        make(map[int][]*pb.ViewChangeRequest),
 		transactionQueue:     make(chan *pb.TransactionRequest, 100),
 		globalSequence:       0,
 		lastStableCheckpoint: 0,
@@ -92,8 +96,17 @@ func main() {
 		notifyCh:             make(chan struct{}, 1),
 		processNotify:        make(chan struct{}, 100),
 		lock:                 sync.Mutex{},
+		ServerMapping: map[int32]int32{
+			0: 7,
+			1: 1,
+			2: 2,
+			3: 3,
+			4: 4,
+			5: 5,
+			6: 6,
+		},
 	}
-	currNode.isLeader = currNode.view%7 == currNode.nodeID
+	currNode.isLeader = currNode.ServerMapping[currNode.view%7] == currNode.nodeID
 	go timerThread(currNode)
 	go setupReplicaReceiver(id, currNode)
 	// go setupReplicaSender(id)
@@ -236,6 +249,8 @@ func (node *Node) CollectedPrepare(ctx context.Context, req *pb.CollectPrepareRe
 		return &emptypb.Empty{}, nil
 	}
 	fmt.Println("Outside replicae collected  PREPARE")
+	fmt.Println("AM i a leader ", node.isLeader)
+	fmt.Println("My current View is ", node.view)
 	seq := req.CollectPrepare.PrepareMessageRequest[0].PrepareMessage.SequenceNumber
 	if len(req.CollectPrepare.PrepareMessageRequest) >= 3*F {
 
@@ -289,14 +304,54 @@ func (node *Node) RequestViewChange(ctx context.Context, req *pb.ViewChangeReque
 	fmt.Println("Got View Change Request from ", req.ReplicaId)
 	fmt.Println("Last Stable Checkpoint ", req.LastStableCheckpoint)
 	fmt.Println("Checkpoint Proof \n", req.CheckpointMsg)
-	fmt.Println("View Change load \n", req.ViewChangeLoad)
-
-	// Directly reference node.viewChangeTracker to modify the original
+	// fmt.Println("View Change load \n", req.ViewChangeLoad)
+	fmt.Println("This server is forcing me to go to view ", req.NextView)
+	if _, exists := node.viewChangeLog[int(req.NextView)]; !exists {
+		// Initialize the slice if it does not exist
+		node.viewChangeLog[int(req.NextView)] = []*pb.ViewChangeRequest{}
+		node.viewChangeTracker.viewChangeCount = 0
+	}
+	node.viewChangeLog[int(req.NextView)] = append(node.viewChangeLog[int(req.NextView)], req)
 	node.viewChangeTracker.viewChangeCount++
+	node.lowestNextView = min(node.lowestNextView, req.NextView)
 	node.checkViewChangeThresholds(&node.viewChangeTracker, int(req.NextView))
 
 	return &emptypb.Empty{}, nil
 }
+func (node *Node) NewView(ctx context.Context, req *pb.NewViewMessage) (*emptypb.Empty, error) {
+	node.lock.Lock()
+	defer node.lock.Unlock()
+	// Check if ViewChangeReq is non-empty before accessing its elements
+	if len(req.ViewChangeReq) > 0 && req.ViewChangeReq[0] != nil {
+		if node.lastStableCheckpoint < int(req.MaxCheckpoint) {
+			go synchCheckpoint(int(req.ViewChangeReq[0].LastStableCheckpoint))
+		} else {
+			node.lastStableCheckpoint = int(req.MaxCheckpoint)
+		}
+	}
+
+	fmt.Println("Inside New View sent by", req.NewLeaderId)
+	node.isViewChangeProcess = false
+	// Iterate over PrePrepareReq and check for nil values
+	for _, preprepare := range req.PrePrepareReq {
+		// fmt.Println("Inside LOOP")
+		fmt.Println()
+		if preprepare != nil && preprepare.PrePrepareMessage != nil {
+			tempSeq := preprepare.PrePrepareMessage.SequenceNumber
+			fmt.Println("Temp SEQ ", tempSeq, " LastStable Check point ", node.lastStableCheckpoint)
+			if tempSeq > int32(node.lastStableCheckpoint) {
+				node.processPool[int(tempSeq)] = true
+				if node.timer != nil {
+					node.startOrResetTimer(time.Second * 10)
+				}
+				go node.AcceptNewViewPrePrepare(preprepare)
+			}
+		}
+	}
+
+	return &emptypb.Empty{}, nil
+}
+
 func (node *Node) Commit(ctx context.Context, req *pb.CommitMessage) (*emptypb.Empty, error) {
 	node.lock.Lock()
 	defer node.lock.Unlock()
@@ -385,4 +440,71 @@ func (node *Node) GetStatus(ctx context.Context, req *pb.StatusRequest) (*pb.Sta
 	return &pb.StatusResponse{
 		State: node.logs[int(req.SequenceNumber)].status,
 	}, nil
+}
+
+func (node *Node) Flush(ctx context.Context, req *emptypb.Empty) (*emptypb.Empty, error) {
+	node.lock.Lock()
+	defer node.lock.Unlock()
+
+	close(node.transactionQueue)
+	close(node.notifyCh)
+	close(node.processNotify)
+
+	node.isActive = true
+	if node.nodeID == 1 {
+		node.isLeader = true
+	} else {
+		node.isLeader = false
+	}
+	node.isbyzantine = false
+	node.isViewChangeProcess = false
+	node.lowestNextView = 0
+	node.view = 1
+	node.globalSequence = 0
+	node.lastStableCheckpoint = 0
+
+	// Clear all collections and data structures
+	node.nodeBalances = map[string]int32{
+		"A": 10,
+		"B": 10,
+		"C": 10,
+		"D": 10,
+		"E": 10,
+		"F": 10,
+		"G": 10,
+		"H": 10,
+		"I": 10,
+		"J": 10,
+	} // Reset balances to default
+
+	// Clear logs and trackers
+	node.logs = make(map[int]Log)
+	node.processPool = make(map[int]bool)
+	node.viewChangeLog = make(map[int][]*pb.ViewChangeRequest)
+	node.prepareTrackers = make(map[int]*PrepareTracker)
+	node.commitTrackers = make(map[int]*CommitTracker)
+	node.checkpointTracker = make(map[int]*CheckPointTracker)
+	node.viewChangeTracker = ViewChangeTracker{
+		viewChangeCount:       0,
+		viewChangeStartChan:   make(chan struct{}, 1),
+		doneChan:              make(chan struct{}, 1),
+		viewChangeSuccessChan: make(chan struct{}, 1),
+	}
+
+	// Clear channels
+	node.transactionQueue = make(chan *pb.TransactionRequest, 100)
+	node.prepareChan = make(chan struct{}, 1)
+	node.commitChan = make(chan struct{}, 1)
+	node.notifyCh = make(chan struct{}, 1)
+	node.processNotify = make(chan struct{}, 100)
+
+	// Stop and reset the timer
+	if node.timer != nil {
+		node.timer.Stop()
+		node.timer = nil
+	}
+	node.StartTransactionProcessor()
+	go executionThread(node)
+	go timerThread(node)
+	return &emptypb.Empty{}, nil
 }
