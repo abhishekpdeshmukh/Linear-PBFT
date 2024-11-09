@@ -45,21 +45,24 @@ func (ch *ClientHandler) monitorReplies() {
 	for {
 		ch.mu.Lock()
 		if ch.processing {
-			ch.mu.Unlock()
 			select {
 			case <-ch.timer.C: // Timeout occurred
-				ch.mu.Lock()
-				if ch.processing {
-					fmt.Printf("Client %s: Timeout occurred for transaction %d, broadcasting to all nodes\n",
-						ch.clientID, ch.currentTx.TransactionId)
-					// Broadcast to all nodes because we did not receive f+1 responses
-					// go broadcastTransaction(ch.currentTx)
-					// ch.replyCount = 0
-					// ch.processing = false
-					// ch.processDone <- struct{}{} // Signal processing complete
-				}
+				fmt.Printf("Client %s: Timeout occurred for transaction %d, broadcasting to all nodes\n",
+					ch.clientID, ch.currentTx.TransactionId)
+
+				// Broadcast the transaction to all nodes
+				go broadcastTransaction(ch.currentTx)
+
+				// Reset the timer and continue waiting for replies
+				ch.timer.Reset(10 * time.Second)
 				ch.mu.Unlock()
+
+			case <-ch.processDone: // Processing completed
+				ch.processing = false
+				ch.mu.Unlock()
+
 			default:
+				ch.mu.Unlock()
 				time.Sleep(100 * time.Millisecond) // Prevent busy waiting
 			}
 		} else {
