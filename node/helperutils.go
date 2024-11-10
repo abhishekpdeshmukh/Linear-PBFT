@@ -260,7 +260,6 @@ func (node *Node) stopTimer() {
 		node.timer = nil // Clear the timer reference
 	}
 }
-
 func executionThread(node *Node) {
 	seqCounter := 1
 
@@ -268,37 +267,57 @@ func executionThread(node *Node) {
 		// Wait for a notification
 		<-node.notifyCh
 
-		// Check if the current seqCounter log entry is committed
+		// Process committed log entries
 		for {
+			// node.lock.Lock()
 			entry, exists := node.logs[seqCounter]
 			if !exists || !entry.isCommitted {
+				// node.lock.Unlock()
 				break // Exit the loop if the log entry does not exist or is not committed
 			}
 
-			// Execute the transaction and send a reply to the client
-			// updateState(seqCounter)
-			// sendReplyToClient(seqCounter)
-			if !node.isbyzantine {
+			// Execute the transaction
+			if !node.isbyzantine && node.isActive {
 				fmt.Println("INSIDE EXECUTOR")
+
+				// Extract transaction details
 				sender := entry.transaction.Transaction.Sender
 				receiver := entry.transaction.Transaction.Receiver
 				amount := entry.transaction.Transaction.Amount
+				// if !node.transactionPool[entry.transactionID] && !(node.nodeBalances[sender]-int32(amount) >= 0) {
+
+				fmt.Println("Sender:", sender, "Receiver:", receiver, "Amount:", amount)
+				fmt.Println("Current Balances - Sender:", node.nodeBalances[sender], "Receiver:", node.nodeBalances[receiver])
+
+				// Update balances
+				node.lock.Lock()
 				node.nodeBalances[sender] -= int32(amount)
 				node.nodeBalances[receiver] += int32(amount)
-				delete(node.processPool, seqCounter)
+
 				entry.status = "E"
 				node.logs[seqCounter] = entry
-				c, ctx, conn := setupClientSender(0)
-				c.ServerResponse(ctx, &pb.ServerResponseMsg{
-					ClientId:      sender,
-					TransactionId: int32(node.logs[seqCounter].transactionID),
-					View:          node.view,
-				})
-				conn.Close()
+				node.transactionPool[entry.transactionID] = true
+				node.lock.Unlock()
+				// }
+				delete(node.processPool, seqCounter)
+				// Unlock before making external calls
+				// node.lock.Unlock()
 
+				// Send a response to the client
+				c, ctx, conn := setupClientSender(0)
+				go func() {
+					c.ServerResponse(ctx, &pb.ServerResponseMsg{
+						ClientId:      sender,
+						TransactionId: int32(entry.transactionID),
+						View:          node.view,
+					})
+					conn.Close()
+				}()
+
+				// Checkpoint logic
 				if seqCounter%CheckPoint == 0 {
 					digest, _ := BalanceDigest(&pb.BalanceResponse{
-						Balance: entry.currBalances,
+						Balance: node.nodeBalances,
 					})
 					for i := 1; i < 8; i++ {
 						go func(i int, digest []byte, seq int) {
@@ -312,12 +331,82 @@ func executionThread(node *Node) {
 						}(i, digest, seqCounter)
 					}
 				}
+			} else {
+				node.lock.Unlock() // Unlock if the node is Byzantine
 			}
+
 			// Increment the seqCounter to process the next entry
 			seqCounter++
 		}
 	}
 }
+
+// func executionThread(node *Node) {
+// 	seqCounter := 1
+
+// 	for {
+// 		// Wait for a notification
+// 		<-node.notifyCh
+
+// 		// Check if the current seqCounter log entry is committed
+// 		for {
+// 			entry, exists := node.logs[seqCounter]
+// 			if !exists || !entry.isCommitted {
+// 				break // Exit the loop if the log entry does not exist or is not committed
+// 			}
+
+// 			// Execute the transaction and send a reply to the client
+// 			// updateState(seqCounter)
+// 			// sendReplyToClient(seqCounter)
+// 			if !node.isbyzantine {
+// 				fmt.Println("INSIDE EXECUTOR")
+// 				node.lock.Lock()
+// 				sender := entry.transaction.Transaction.Sender
+// 				fmt.Println("Sender ", sender)
+// 				receiver := entry.transaction.Transaction.Receiver
+// 				fmt.Println("Reciever ", receiver)
+// 				amount := entry.transaction.Transaction.Amount
+// 				fmt.Println("Amoun ", amount)
+// 				fmt.Println("Current Balance of Accounts involved")
+// 				fmt.Println("Sender Reciever ", node.nodeBalances[sender], " ", node.nodeBalances[receiver])
+// 				node.nodeBalances[sender] -= int32(amount)
+// 				node.nodeBalances[receiver] += int32(amount)
+// 				delete(node.processPool, seqCounter)
+// 				entry.status = "E"
+// 				node.logs[seqCounter] = entry
+
+// 				c, ctx, conn := setupClientSender(0)
+// 				go c.ServerResponse(ctx, &pb.ServerResponseMsg{
+// 					ClientId:      sender,
+// 					TransactionId: int32(node.logs[seqCounter].transactionID),
+// 					View:          node.view,
+// 				})
+// 				conn.Close()
+
+// 				if seqCounter%CheckPoint == 0 {
+// 					digest, _ := BalanceDigest(&pb.BalanceResponse{
+// 						Balance: entry.currBalances,
+// 					})
+// 					for i := 1; i < 8; i++ {
+// 						go func(i int, digest []byte, seq int) {
+// 							c, ctx, conn := setupReplicaSender(i)
+// 							c.RecieveCheckpoint(ctx, &pb.CheckpointMsg{
+// 								ReplicaId:      node.nodeID,
+// 								SequenceNumber: int32(seq),
+// 								Digest:         digest,
+// 							})
+// 							conn.Close()
+// 						}(i, digest, seqCounter)
+// 					}
+// 				}
+
+// 			}
+// 			// Increment the seqCounter to process the next entry
+// 			node.lock.Unlock()
+// 			seqCounter++
+// 		}
+// 	}
+// }
 
 func (node *Node) initiateViewChange() {
 	var viewChangeLoadReq []*pb.ViewChangeLoad
