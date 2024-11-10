@@ -36,10 +36,12 @@ type Node struct {
 	notifyCh             chan struct{}
 	processNotify        chan struct{}
 	lock                 sync.Mutex
+	transactionPool      map[int]bool
 	processPool          map[int]bool
 	logs                 map[int]Log
 	ServerMapping        map[int32]int32
 	viewChangeLog        map[int][]*pb.ViewChangeRequest
+	newViewMessages      []*pb.NewViewMessage
 	prepareTrackers      map[int]*PrepareTracker // Trackers for each sequence number
 	commitTrackers       map[int]*CommitTracker
 	checkpointTracker    map[int]*CheckPointTracker
@@ -88,6 +90,8 @@ func main() {
 		commitTrackers:       make(map[int]*CommitTracker),
 		checkpointTracker:    make(map[int]*CheckPointTracker),
 		viewChangeLog:        make(map[int][]*pb.ViewChangeRequest),
+		newViewMessages:      make([]*pb.NewViewMessage, 0),
+		transactionPool:      make(map[int]bool, 0),
 		transactionQueue:     make(chan *pb.TransactionRequest, 100),
 		globalSequence:       0,
 		lastStableCheckpoint: 0,
@@ -134,6 +138,9 @@ func main() {
 }
 
 func (node *Node) PrePrepare(ctx context.Context, req *pb.PrePrepareMessageWrapper) (*emptypb.Empty, error) {
+	if !node.isActive {
+		return &emptypb.Empty{}, nil
+	}
 	node.lock.Lock()
 	defer node.lock.Unlock()
 	if !node.isActive {
@@ -198,6 +205,9 @@ func (node *Node) PrePrepare(ctx context.Context, req *pb.PrePrepareMessageWrapp
 }
 
 func (node *Node) Prepare(ctx context.Context, req *pb.PrepareMessageRequest) (*emptypb.Empty, error) {
+	if !node.isActive {
+		return &emptypb.Empty{}, nil
+	}
 	node.lock.Lock()
 	defer node.lock.Unlock()
 	fmt.Println("*****************INSIDE PREPARE****************")
@@ -298,6 +308,9 @@ func (node *Node) CollectedPrepare(ctx context.Context, req *pb.CollectPrepareRe
 
 }
 func (node *Node) RequestViewChange(ctx context.Context, req *pb.ViewChangeRequest) (*emptypb.Empty, error) {
+	if !node.isActive {
+		return &emptypb.Empty{}, nil
+	}
 	node.lock.Lock()
 	defer node.lock.Unlock()
 
@@ -319,6 +332,9 @@ func (node *Node) RequestViewChange(ctx context.Context, req *pb.ViewChangeReque
 	return &emptypb.Empty{}, nil
 }
 func (node *Node) NewView(ctx context.Context, req *pb.NewViewMessage) (*emptypb.Empty, error) {
+	if !node.isActive {
+		return &emptypb.Empty{}, nil
+	}
 	node.lock.Lock()
 	defer node.lock.Unlock()
 	// Check if ViewChangeReq is non-empty before accessing its elements
@@ -332,6 +348,9 @@ func (node *Node) NewView(ctx context.Context, req *pb.NewViewMessage) (*emptypb
 
 	fmt.Println("Inside New View sent by", req.NewLeaderId)
 	node.isViewChangeProcess = false
+	if req != nil {
+		node.newViewMessages = append(node.newViewMessages, req)
+	}
 	// Iterate over PrePrepareReq and check for nil values
 	for _, preprepare := range req.PrePrepareReq {
 		// fmt.Println("Inside LOOP")
@@ -353,9 +372,14 @@ func (node *Node) NewView(ctx context.Context, req *pb.NewViewMessage) (*emptypb
 }
 
 func (node *Node) Commit(ctx context.Context, req *pb.CommitMessage) (*emptypb.Empty, error) {
+	if !node.isActive {
+		return &emptypb.Empty{}, nil
+	}
 	node.lock.Lock()
 	defer node.lock.Unlock()
+
 	sequenceNum := int(req.SequenceNumber)
+
 	// Retrieve or initialize the CommitTracker
 	tracker, exists := node.commitTrackers[sequenceNum]
 	if !exists {
@@ -365,13 +389,31 @@ func (node *Node) Commit(ctx context.Context, req *pb.CommitMessage) (*emptypb.E
 			go node.monitorCommitTimeout(sequenceNum)
 		}
 	}
+
+	// Log the commit message
+	logEntry, logExists := node.logs[sequenceNum]
+	if !logExists {
+		// Initialize a new Log entry if it doesn't exist
+		logEntry = Log{
+			sequenceNumber: sequenceNum,
+			viewNumber:     int(req.ViewNumber),
+			transactionID:  int(req.TransactionId),
+			commitMsgLog:   []*pb.CommitMessage{},
+		}
+	}
+	// Append the commit message to the commitMsgLog
+	logEntry.commitMsgLog = append(logEntry.commitMsgLog, req)
+	node.logs[sequenceNum] = logEntry
+
 	tracker.commitCount++
 	fmt.Println("Commit Count for", sequenceNum, ":", tracker.commitCount)
+
 	if !node.isbyzantine {
-		node.checkCommitThresholds(sequenceNum, tracker)
+		go node.checkCommitThresholds(sequenceNum, tracker)
 	}
 	return &emptypb.Empty{}, nil
 }
+
 func (node *Node) RecieveCheckpoint(ctx context.Context, req *pb.CheckpointMsg) (*emptypb.Empty, error) {
 	node.lock.Lock()
 	defer node.lock.Unlock()
@@ -445,7 +487,7 @@ func (node *Node) GetStatus(ctx context.Context, req *pb.StatusRequest) (*pb.Sta
 func (node *Node) Flush(ctx context.Context, req *emptypb.Empty) (*emptypb.Empty, error) {
 	node.lock.Lock()
 	defer node.lock.Unlock()
-
+	fmt.Println("I am going Flush Now")
 	close(node.transactionQueue)
 	close(node.notifyCh)
 	close(node.processNotify)
@@ -480,6 +522,7 @@ func (node *Node) Flush(ctx context.Context, req *emptypb.Empty) (*emptypb.Empty
 	// Clear logs and trackers
 	node.logs = make(map[int]Log)
 	node.processPool = make(map[int]bool)
+	node.transactionPool = make(map[int]bool)
 	node.viewChangeLog = make(map[int][]*pb.ViewChangeRequest)
 	node.prepareTrackers = make(map[int]*PrepareTracker)
 	node.commitTrackers = make(map[int]*CommitTracker)
@@ -503,8 +546,72 @@ func (node *Node) Flush(ctx context.Context, req *emptypb.Empty) (*emptypb.Empty
 		node.timer.Stop()
 		node.timer = nil
 	}
-	node.StartTransactionProcessor()
+	go node.StartTransactionProcessor()
 	go executionThread(node)
 	go timerThread(node)
+	fmt.Println("I have flushed")
 	return &emptypb.Empty{}, nil
+}
+
+func (node *Node) GetLogs(ctx context.Context, req *emptypb.Empty) (*pb.GetLogsResponse, error) {
+	node.lock.Lock()
+	defer node.lock.Unlock()
+
+	response := &pb.GetLogsResponse{}
+
+	// Iterate over node.logs and convert each Log to a LogEntry
+	for _, logEntry := range node.logs {
+		entry := &pb.LogEntry{
+			SequenceNumber:     int32(logEntry.sequenceNumber),
+			TransactionId:      int32(logEntry.transactionID),
+			Status:             logEntry.status,
+			ViewNumber:         int32(logEntry.viewNumber),
+			Transaction:        logEntry.transaction,
+			PrePrepareMessages: logEntry.prePrepareMsgLog,
+			PrepareMessages:    logEntry.prepareMsgLog,
+			CommitMessages:     logEntry.commitMsgLog,
+		}
+		response.Logs = append(response.Logs, entry)
+	}
+
+	return response, nil
+}
+
+func (node *Node) GetNewViewMessages(ctx context.Context, req *emptypb.Empty) (*pb.GetNewViewMessagesResponse, error) {
+	node.lock.Lock()
+	defer node.lock.Unlock()
+
+	response := &pb.GetNewViewMessagesResponse{}
+
+	for _, newViewMsg := range node.newViewMessages {
+		if newViewMsg == nil {
+			continue // Skip nil entries
+		}
+
+		// Ensure ViewChangeReq and PrePrepareReq are not nil
+		var viewChangeReqs []*pb.ViewChangeRequest
+		if newViewMsg.ViewChangeReq != nil {
+			viewChangeReqs = newViewMsg.ViewChangeReq
+		} else {
+			viewChangeReqs = []*pb.ViewChangeRequest{}
+		}
+
+		var prePrepareReqs []*pb.PrePrepareRequest
+		if newViewMsg.PrePrepareReq != nil {
+			prePrepareReqs = newViewMsg.PrePrepareReq
+		} else {
+			prePrepareReqs = []*pb.PrePrepareRequest{}
+		}
+
+		entry := &pb.NewViewLogEntry{
+			ViewNumber:         newViewMsg.NextView,
+			NewLeaderId:        newViewMsg.NewLeaderId,
+			ViewChangeRequests: viewChangeReqs,
+			PrePrepareRequests: prePrepareReqs,
+			MaxCheckpoint:      newViewMsg.MaxCheckpoint,
+		}
+		response.NewViewMessages = append(response.NewViewMessages, entry)
+	}
+
+	return response, nil
 }
