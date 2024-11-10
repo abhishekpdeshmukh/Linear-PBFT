@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	pb "github.com/abhishekpdeshmukh/LINEAR-PBFT/proto"
@@ -213,4 +214,167 @@ func transactionDigest(tx *pb.Transaction) ([]byte, error) {
 	hash := sha256.New()
 	hash.Write(data)
 	return hash.Sum(nil), nil
+}
+
+func PrintLogs(logs []*pb.LogEntry) {
+	// Initialize tab writer for formatted output
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+
+	// Print basic log info
+	fmt.Println("========== Log Entries ==========")
+	fmt.Fprintln(w, "SeqNum\tTxnID\tStatus\tViewNum\tTransaction")
+	for _, logEntry := range logs {
+		txn := logEntry.Transaction.Transaction
+		fmt.Fprintf(w, "%d\t%d\t%s\t%d\tFrom %s to %s Amount %.2f\n",
+			logEntry.SequenceNumber,
+			logEntry.TransactionId,
+			logEntry.Status,
+			logEntry.ViewNumber,
+			txn.Sender,
+			txn.Receiver,
+			txn.Amount)
+	}
+	w.Flush()
+
+	// Print PrePrepare Messages
+	fmt.Println("\n======== PrePrepare Messages ========")
+	fmt.Fprintln(w, "SeqNum\tLeaderID\tViewNum\tTxnDigest")
+	for _, logEntry := range logs {
+		for _, pp := range logEntry.PrePrepareMessages {
+			fmt.Fprintf(w, "%d\t%d\t%d\t%x\n",
+				pp.PrePrepareMessage.SequenceNumber,
+				pp.PrePrepareMessage.LeaderId,
+				pp.PrePrepareMessage.ViewNumber,
+				pp.PrePrepareMessage.TransactionDigest)
+		}
+	}
+	w.Flush()
+
+	// Print Prepare Messages
+	fmt.Println("\n======== Prepare Messages ========")
+	fmt.Fprintln(w, "SeqNum\tReplicaID\tViewNum\tTxnDigest")
+	for _, logEntry := range logs {
+		for _, p := range logEntry.PrepareMessages {
+			fmt.Fprintf(w, "%d\t%d\t%d\t%x\n",
+				p.PrepareMessage.SequenceNumber,
+				p.PrepareMessage.ReplicaId,
+				p.PrepareMessage.ViewNumber,
+				p.PrepareMessage.TransactionDigest)
+		}
+	}
+	w.Flush()
+
+	// Print Commit Messages
+	fmt.Println("\n======== Commit Messages ========")
+	fmt.Fprintln(w, "SeqNum\tReplicaID\tViewNum\tTxnDigest")
+	for _, logEntry := range logs {
+		for _, c := range logEntry.CommitMessages {
+			fmt.Fprintf(w, "%d\t%d\t%d\t%x\n",
+				c.SequenceNumber,
+				c.ReplicaId,
+				c.ViewNumber,
+				c.TransactionDigest)
+		}
+	}
+	w.Flush()
+}
+
+func PrintNewViewMessages(newViewMessages []*pb.NewViewLogEntry) {
+	if len(newViewMessages) == 0 {
+		fmt.Println("No view changes have occurred.")
+		return
+	}
+
+	for idx, newView := range newViewMessages {
+		if newView == nil {
+			continue // Skip nil entries
+		}
+		fmt.Printf("\n===== New View Message %d =====\n", idx+1)
+		fmt.Printf("View Number: %d\n", newView.ViewNumber)
+		fmt.Printf("New Leader ID: %d\n", newView.NewLeaderId)
+		fmt.Printf("Max Checkpoint: %d\n", newView.MaxCheckpoint)
+
+		// Print View Change Requests
+		fmt.Println("\n-- View Change Requests --")
+		for _, vcr := range newView.ViewChangeRequests {
+			if vcr == nil {
+				continue
+			}
+			fmt.Printf("\nReplica ID: %d\n", vcr.ReplicaId)
+			// ... rest of the printing logic
+		}
+
+		// Print PrePrepare Requests
+		fmt.Println("\n-- PrePrepare Requests --")
+		for _, pp := range newView.PrePrepareRequests {
+			if pp == nil || pp.PrePrepareMessage == nil {
+				continue
+			}
+			ppm := pp.PrePrepareMessage
+			fmt.Printf("Sequence Number: %d, Transaction ID: %d, View Number: %d, Leader ID: %d\n",
+				ppm.SequenceNumber, ppm.TransactionId, ppm.ViewNumber, ppm.LeaderId)
+		}
+	}
+}
+
+func PrintPerformance() {
+	var totalTransactions int
+	var totalTime time.Duration
+	var totalLatency time.Duration
+	var totalThroughput float64
+
+	clientHandlersMu.Lock()
+	defer clientHandlersMu.Unlock()
+
+	fmt.Println("\n========== Performance Metrics ==========")
+	for clientID, handler := range clientHandlers {
+		handler.mu.Lock()
+
+		numTransactions := handler.transactionsNum
+		if numTransactions == 0 {
+			handler.mu.Unlock()
+			continue
+		}
+
+		// Calculate total time for this client
+		clientTotalTime := handler.totalEndTime.Sub(handler.totalStartTime)
+
+		// Sum up latencies
+		clientTotalLatency := time.Duration(0)
+		for _, latency := range handler.latencies {
+			clientTotalLatency += latency
+		}
+
+		// Calculate average latency and throughput
+		avgLatency := clientTotalLatency / time.Duration(numTransactions)
+		throughput := float64(numTransactions) / clientTotalTime.Seconds()
+
+		fmt.Printf("Client ID: %s\n", clientID)
+		fmt.Printf("  Total Transactions: %d\n", numTransactions)
+		fmt.Printf("  Total Time: %.2f seconds\n", clientTotalTime.Seconds())
+		fmt.Printf("  Average Latency: %.2f ms\n", avgLatency.Seconds()*1000)
+		fmt.Printf("  Throughput: %.2f transactions/sec\n\n", throughput)
+
+		// Aggregate totals
+		totalTransactions += numTransactions
+		totalTime += clientTotalTime
+		totalLatency += clientTotalLatency
+		totalThroughput += throughput
+
+		handler.mu.Unlock()
+	}
+
+	// Calculate overall performance
+	if totalTransactions > 0 && totalTime.Seconds() > 0 {
+		overallAvgLatency := totalLatency / time.Duration(totalTransactions)
+		overallThroughput := float64(totalTransactions) / totalTime.Seconds()
+
+		fmt.Println("----- Overall Performance -----")
+		fmt.Printf("Total Transactions: %d\n", totalTransactions)
+		fmt.Printf("Total Time: %.2f seconds\n", totalTime.Seconds())
+		fmt.Printf("Average Latency per Transaction: %.2f ms\n", overallAvgLatency.Seconds()*1000)
+		fmt.Printf("Throughput: %.2f transactions/sec\n", overallThroughput)
+	} else {
+		fmt.Println("No transactions were processed.")
+	}
 }
