@@ -32,6 +32,12 @@ type ClientHandler struct {
 	replyCount  int
 	processing  bool
 	processDone chan struct{} // Channel to signal processing completion
+
+	startTime       time.Time
+	latencies       []time.Duration
+	totalStartTime  time.Time
+	totalEndTime    time.Time
+	transactionsNum int
 }
 
 const N = 7
@@ -67,7 +73,7 @@ func main() {
 		fmt.Println("1. Read Transaction SET on Default Path")
 		fmt.Println("2. Send Transactions (Next Set)")
 		fmt.Println("3. Send Client Public Key")
-		fmt.Println("4. Print Balance on Specific Server")
+		fmt.Println("4. Print Performance Metrics")                   // New option
 		fmt.Println("5. Print Log for Specific Server")               // New option
 		fmt.Println("6. Print DB State")                              // New option
 		fmt.Println("7. Print Transaction Status by Sequence Number") // New option
@@ -172,7 +178,7 @@ func main() {
 					go func(cID string, transactions []*pb.TransactionRequest) {
 						defer wg.Done()
 						handler := getClientHandler(cID)
-
+						handler.totalStartTime = time.Now()
 						// Process transactions sequentially for this client
 						for _, tx := range transactions {
 							// Wait for the previous transaction to complete
@@ -187,6 +193,8 @@ func main() {
 							handler.currentTx = tx
 							handler.replyCount = 0
 							handler.processing = true
+							handler.startTime = time.Now() // Record start time for latency
+							handler.transactionsNum++
 							handler.timer.Reset(10 * time.Second) // Restart the timer for the new transaction
 							handler.mu.Unlock()
 
@@ -199,7 +207,17 @@ func main() {
 									log.Printf("Failed to send transaction to primary: %v", err)
 								}
 							}()
+
 						}
+						// handler.mu.Lock()
+						// for handler.processing {
+						// 	handler.mu.Unlock()
+						// 	<-handler.processDone
+						// 	handler.mu.Lock()
+						// }
+						handler.totalEndTime = time.Now() // Record total end time for throughput
+						// handler.mu.Unlock()
+
 					}(clientID, txs)
 				}
 
@@ -217,11 +235,31 @@ func main() {
 			// fmt.Println(masterPrivateKey)
 			// initiateTSSHandshake(masterPublicKey, priShares, pubPoly)
 		case 4:
-			fmt.Println("Executing: Print Balance on Specific Server")
+			fmt.Println("Executing: Print Performance Metrics")
+			PrintPerformance()
 
 		case 5:
 			fmt.Println("Executing: Print Log for Specific Server")
-			// Placeholder for printing the log of a specific server
+			fmt.Print("Enter the server number (1-7): ")
+			var serverNum int
+			_, err := fmt.Scanf("%d", &serverNum)
+			if err != nil || serverNum < 1 || serverNum > 7 {
+				fmt.Println("Invalid server number")
+				continue
+			}
+
+			// Set up RPC client for the server
+			c, ctx, conn := setupClientSender(serverNum)
+
+			// Call GetLogs method
+			logsResponse, err := c.GetLogs(ctx, &emptypb.Empty{})
+			if err != nil {
+				fmt.Printf("Failed to get logs from Server %d: %v\n", serverNum, err)
+				continue
+			}
+			conn.Close()
+			// Print the logs
+			PrintLogs(logsResponse.Logs)
 
 		case 6:
 			fmt.Println("Executing: Print DB State")
@@ -283,15 +321,37 @@ func main() {
 
 		case 8:
 			fmt.Println("Executing: Print View Changes")
-			// Placeholder for printing view change messages
+			fmt.Print("Enter the server number (1-7): ")
+			var serverNum int
+			_, err := fmt.Scanf("%d", &serverNum)
+			if err != nil || serverNum < 1 || serverNum > 7 {
+				fmt.Println("Invalid server number")
+				continue
+			}
+
+			// Set up RPC client for the server
+			c, ctx, conn := setupClientSender(serverNum)
+			defer conn.Close()
+
+			// Call GetNewViewMessages method
+			newViewResponse, err := c.GetNewViewMessages(ctx, &emptypb.Empty{})
+			if err != nil {
+				fmt.Printf("Failed to get new view messages from Server %d: %v\n", serverNum, err)
+				continue
+			}
+
+			// Print the new view messages
+			PrintNewViewMessages(newViewResponse.NewViewMessages)
 
 		case 9:
 			fmt.Println("Flushing Everything")
 			for i := 1; i <= 7; i++ {
 				c, ctx, conn := setupClientSender(i) // Set up RPC client for each server
 				c.Flush(ctx, &emptypb.Empty{})
+				time.Sleep(time.Second)
 				conn.Close()
 			}
+
 			fmt.Println("Flushed Everything")
 		case 10:
 			fmt.Println("Exiting...")
@@ -302,6 +362,41 @@ func main() {
 		}
 	}
 }
+
+// func (c *Client) ServerResponse(ctx context.Context, req *pb.ServerResponseMsg) (*emptypb.Empty, error) {
+// 	fmt.Printf("Received ClientResponse for Client %s, Transaction %d\n", req.ClientId, req.TransactionId)
+
+// 	// Find the appropriate client handler
+// 	clientHandlersMu.Lock()
+// 	handler, exists := clientHandlers[req.ClientId]
+// 	c.view = req.View
+// 	clientHandlersMu.Unlock()
+
+// 	if exists {
+// 		handler.mu.Lock()
+// 		defer handler.mu.Unlock()
+
+// 		// Check if the transaction ID matches the current transaction being processed
+// 		if handler.processing && req.TransactionId == handler.currentTx.TransactionId {
+// 			// Increment the reply count
+// 			handler.replyCount++
+// 			fmt.Printf("Client %s: Current reply count for transaction %d is %d\n", req.ClientId, req.TransactionId, handler.replyCount)
+
+// 			// If we've received f+1 replies, stop the timer and prepare for the next transaction
+// 			if handler.replyCount >= F+1 {
+// 				if !handler.timer.Stop() {
+// 					<-handler.timer.C // Drain the timer if it already fired
+// 				}
+// 				fmt.Printf("Client %s: Received f+1 replies for transaction %d\n", req.ClientId, req.TransactionId)
+// 				handler.replyCount = 0
+// 				handler.processing = false
+// 				handler.processDone <- struct{}{} // Signal processing completion
+// 			}
+// 		}
+// 	}
+
+// 	return &emptypb.Empty{}, nil
+// }
 
 func (c *Client) ServerResponse(ctx context.Context, req *pb.ServerResponseMsg) (*emptypb.Empty, error) {
 	fmt.Printf("Received ClientResponse for Client %s, Transaction %d\n", req.ClientId, req.TransactionId)
@@ -330,6 +425,10 @@ func (c *Client) ServerResponse(ctx context.Context, req *pb.ServerResponseMsg) 
 				fmt.Printf("Client %s: Received f+1 replies for transaction %d\n", req.ClientId, req.TransactionId)
 				handler.replyCount = 0
 				handler.processing = false
+
+				// Record latency
+				latency := time.Since(handler.startTime)
+				handler.latencies = append(handler.latencies, latency)
 				handler.processDone <- struct{}{} // Signal processing completion
 			}
 		}
