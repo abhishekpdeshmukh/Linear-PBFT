@@ -16,6 +16,8 @@ service ClientService {
     rpc BecomeMalicious(google.protobuf.Empty)returns(google.protobuf.Empty){}
     rpc Flush(google.protobuf.Empty)returns(google.protobuf.Empty) {} 
     rpc SendTSSKeys(TSSKeyExchange)returns(google.protobuf.Empty){}
+    rpc GetLogs(google.protobuf.Empty) returns (GetLogsResponse) {}
+    rpc GetNewViewMessages(google.protobuf.Empty) returns (GetNewViewMessagesResponse) {}
 }
 service PBFTService {
   rpc SendToNewLeader(TransactionRequest) returns (google.protobuf.Empty);
@@ -35,6 +37,32 @@ service PBFTService {
   rpc ReceiveServerPublicKey(PublicKeyRequest) returns (Acknowledgment);
 }
 
+
+message GetNewViewMessagesResponse {
+  repeated NewViewLogEntry new_view_messages = 1;
+}
+
+message NewViewLogEntry {
+  int32 view_number = 1;
+  int32 new_leader_id = 2;
+  repeated ViewChangeRequest view_change_requests = 3;
+  repeated PrePrepareRequest pre_prepare_requests = 4;
+  int32 max_checkpoint = 5;
+}
+message GetLogsResponse {
+  repeated LogEntry logs = 1;
+}
+
+message LogEntry {
+  int32 sequence_number = 1;
+  int32 transaction_id = 2;
+  string status = 3;
+  int32 view_number = 4;
+  TransactionRequest transaction = 5;
+  repeated PrePrepareRequest pre_prepare_messages = 6;
+  repeated PrepareMessageRequest prepare_messages = 7;
+  repeated CommitMessage commit_messages = 8;
+}
 message PubPoly {
   repeated string coefficients = 1;
 }
